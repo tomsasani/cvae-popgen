@@ -1,22 +1,23 @@
-SELECTION_VALS = ["0.01"]#, "0.025", "0.05", "0.1"]
+SELECTION_VALS = ["0.005", "0.01"]
 
 TREE_NUMS, SELECTION_PARAMS = [], []
 
-N_NEUTRAL = 5_000
-N_SELECTION = 5_000
+N_NEUTRAL = 10_000
+N_SELECTION = N_NEUTRAL // len(SELECTION_VALS)
 
-for s in SELECTION_VALS:
+CLASS_LABELS = []
+
+for si, s in enumerate(SELECTION_VALS):
     
     TREE_NUMS.extend(list(range(N_SELECTION)))
     SELECTION_PARAMS.extend([s] * N_SELECTION)
-
-print (min(TREE_NUMS), max(TREE_NUMS))
-print (len(SELECTION_PARAMS), len(TREE_NUMS))
+    CLASS_LABELS.extend([si] * N_SELECTION)
 
 rule all:
     input:
-        expand("data/slim/background/neutral_{TREE_NUM}.png", TREE_NUM=list(range(N_NEUTRAL))),
-        expand("data/slim/foreground/{SELECTION}_{TREE_NUM}.png", zip, SELECTION=SELECTION_PARAMS, TREE_NUM=TREE_NUMS)
+        # expand("data/slim/foreground/{SELECTION}_{TREE_NUM}.png", zip, SELECTION=SELECTION_PARAMS, TREE_NUM=TREE_NUMS),
+        expand("data/slim/foreground/{CLASS_LABEL}/{SELECTION}_{TREE_NUM}.png", zip, CLASS_LABEL=CLASS_LABELS, SELECTION=SELECTION_PARAMS, TREE_NUM=TREE_NUMS),
+        expand("data/slim/background/0/neutral_{TREE_NUM}.png", TREE_NUM=list(range(N_NEUTRAL)))
 
 
 rule run_selection:
@@ -24,8 +25,8 @@ rule run_selection:
         slim_script = "slim/simulate_exp_selection.slim",
         slim_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/build/slim"
     output:
-        trees = "slim/output/tree_selection_{SELECTION_STRENGTH}_{TREE_NUM}.trees",
-        other = "slim/output/tree_selection_{SELECTION_STRENGTH}_{TREE_NUM}.junk"
+        trees = temp("slim/output/tree_selection_{SELECTION_STRENGTH}_{TREE_NUM}.trees"),
+        other = temp("slim/output/tree_selection_{SELECTION_STRENGTH}_{TREE_NUM}.junk")
     shell:
         """
         {input.slim_binary} -d mut={wildcards.SELECTION_STRENGTH} \
@@ -39,8 +40,8 @@ rule run_neutral:
         slim_script = "slim/simulate_exp_neutral.slim",
         slim_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/build/slim"
     output:
-        trees = "slim/output/tree_neutral_{TREE_NUM}.trees",
-        other = "slim/output/tree_neutral_{TREE_NUM}.junk"
+        trees = temp("slim/output/tree_neutral_{TREE_NUM}.trees"),
+        other = temp("slim/output/tree_neutral_{TREE_NUM}.junk")
     shell:
         """
         {input.slim_binary} -d mut=0 \
@@ -54,10 +55,10 @@ rule process_selection:
         tree = "slim/output/tree_selection_{SELECTION_STRENGTH}_{TREE_NUM}.trees",
         py_script = "process_slim_trees.py"
     output:
-        "data/slim/foreground/{SELECTION_STRENGTH}_{TREE_NUM}.png"
+        "data/slim/foreground/{CLASS_LABEL}/{SELECTION_STRENGTH}_{TREE_NUM}.png"
     shell:
         """
-        python {input.py_script} --tree {input.tree} --out {output} -n_smps 32 -n_snps 32
+        python {input.py_script} --tree {input.tree} --out {output} -n_smps 128 -n_snps 64
         """
 
 rule process_neutral:
@@ -65,8 +66,8 @@ rule process_neutral:
         tree = "slim/output/tree_neutral_{TREE_NUM}.trees",
         py_script = "process_slim_trees.py"
     output:
-        "data/slim/background/neutral_{TREE_NUM}.png"
+        "data/slim/background/0/neutral_{TREE_NUM}.png"
     shell:
         """
-        python {input.py_script} --tree {input.tree} --out {output} -n_smps 32
+        python {input.py_script} --tree {input.tree} --out {output} -n_smps 128 -n_snps 64
         """

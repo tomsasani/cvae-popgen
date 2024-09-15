@@ -63,6 +63,10 @@ def main(args):
         convert_to_diploid=True,
         n_snps=args.n_snps,
     )
+
+    region = util.sort_min_diff_numpy(
+        region,
+    )
     region = np.expand_dims(region, axis=0)
 
     region = region[0, 0, :, :]

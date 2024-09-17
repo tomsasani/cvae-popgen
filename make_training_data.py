@@ -2,24 +2,26 @@ import demographies
 import generator_fake
 import params
 import util
-
+import os
+import pathlib
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 
-
+# we'll only be changing the size of the "A" population at present,
+# after a bottleneck from a population size of N3
 PARAM_NAMES = ["N1", "N2", "T1", "T2", "growth"]
+
 # initialize basic engine
 engine = generator_fake.Generator(
     demographies.simulate_exp,
     PARAM_NAMES,
     42,
     convert_to_rgb=True,
-    permute=False,
-    n_snps=32,
+    n_snps=64,
     convert_to_diploid=True,
-    seqlen=50_000,
+    seqlen=100_000,
     sort=True,
     filter_singletons=False,
 )
@@ -27,58 +29,84 @@ engine = generator_fake.Generator(
 sim_params = params.ParamSet()
 rng = np.random.default_rng(42)
 
-PARAM_VALUES = [
+# define parameter values we'll use for target dataset,
+# in which we have a population size change in the admixed
+# population
+TG_PARAM_VALUES = [
     [23_231, 29_962, 4_870, 581, 0.00531],  # YRI
     [22_552, 3_313, 3_589, 1_050, 0.00535],  # CEU
-    [9_000, 5_000, 1_500, 350, 0.005],  # CHB
-]
+    [9_000, 5_000, 2_000, 350, 0.001],
+]  # CHB
 
+N_SMPS = 128
+TOTAL_REGIONS = 90_000
+target_regions = TOTAL_REGIONS / len(TG_PARAM_VALUES)
 
-N_SMPS = 32
-total_regions = 15_000 / len(PARAM_VALUES)
-
-
-for model_i in range(len(PARAM_VALUES)):
+for model_i in range(len(TG_PARAM_VALUES)):
     counted = 0
-    while counted < total_regions:
+    while counted < target_regions:
 
-        param_values = PARAM_VALUES[model_i]
+        param_values = TG_PARAM_VALUES[model_i]
 
         region = engine.sample_fake_region(
             [N_SMPS],
             param_values=param_values,
         )
 
-        n_batches_zero_padded = util.check_for_missing_data(region)
-        if n_batches_zero_padded > 0:
+        n_batches_zero_padded = util.check_for_missing_data(region) > 0
+      
+        if n_batches_zero_padded:
             continue
 
         if counted % 100 == 0:
             print(counted)
 
-        if counted == 0:
-            f, axarr = plt.subplots(3)
-            sns.heatmap(region[0, 0, :, :], ax=axarr[0])
-            sns.heatmap(region[0, 1, :, :], ax=axarr[1])
-            sns.heatmap(region[0, 2, :, :], ax=axarr[2])
-            f.savefig("region.png")
-            plt.close()
+        outpref = "train" if counted < int(target_regions * 0.8) else "test"
 
-        # region = np.transpose(region[0, :, :, :], (1, 2, 0))
         region = region[0, 0, :, :]
         region = np.uint8(region * 255)
 
         img = Image.fromarray(region, mode="L")
 
-        if counted == 0:
-            f, axarr = plt.subplots(3)
-            sns.heatmap(img.getchannel("L"), ax=axarr[0])
-            f.savefig("region.img.png")
-            plt.close()
+        outpath = f"data/simulated/target/{outpref}/{model_i}"
+       
+        p = pathlib.Path(outpath)
+        if not p.is_dir():
+            p.mkdir(parents=True)
 
-        if counted < int(total_regions * 0.8):
-            img.save(f"data/simulated/train/{model_i}/{counted}.png")
-        else:
-            img.save(f"data/simulated/test/{model_i}/{counted}.png")
+        img.save(f"{outpath}/{counted}.png")
 
         counted += 1
+
+
+# counted = 0
+# while counted < 1:
+    
+#     region = engine.sample_fake_region(
+#             [N_SMPS],
+#             param_values=[0.005],
+#         )
+#     n_batches_zero_padded = util.check_for_missing_data(region) > 0
+      
+#     if n_batches_zero_padded:
+#         continue
+
+#     if counted % 100 == 0:
+#         print(counted)
+
+#     outpref = "train" if counted < int(TOTAL_REGIONS * 0.8) else "test"
+
+#     region = region[0, 0, :, :]
+#     region = np.uint8(region * 255)
+
+#     img = Image.fromarray(region, mode="L")
+
+#     outpath = f"data/simulated/background/{outpref}/0"
+    
+#     p = pathlib.Path(outpath)
+#     if not p.is_dir():
+#         p.mkdir(parents=True)
+
+#     img.save(f"{outpath}/{counted}.png")
+
+#     counted += 1

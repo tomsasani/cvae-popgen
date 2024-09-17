@@ -28,8 +28,7 @@ class ConvBlock2D(nn.Module):
 
         relu = nn.ReLU()
         norm = nn.BatchNorm2d(out_channels)
-        #layers = [conv, norm, relu]
-        layers = [conv, relu]
+        layers = [conv, norm, relu]
         self.block = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -67,6 +66,78 @@ class ConvTransposeBlock2D(nn.Module):
 
     def forward(self, x):
         return self.block(x)
+
+class CNN(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        latent_dim: int,
+        kernel_size: int = 3,
+        stride: int = 2,
+        padding: int = 1,
+        hidden_dims: List[int] = None,
+        intermediate_dim: int = 128,
+        in_H: int = 32,
+    ) -> None:
+        super(CNN, self).__init__()
+
+        self.latent_dim = latent_dim
+
+        if hidden_dims is None:
+            hidden_dims = [16, 32, 64, 128, 256]
+
+        # figure out final size of image after convs
+        out_H = int(in_H / (2 ** len(hidden_dims)))
+
+        encoder_blocks = []
+        for h_dim in hidden_dims:
+            # initialize convolutional block
+            block = ConvBlock2D(
+                    in_channels=in_channels,
+                    out_channels=h_dim,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                )
+
+            encoder_blocks.append(block)
+
+            in_channels = h_dim
+
+        self.encoder_conv = nn.Sequential(*encoder_blocks)
+
+        self.fc_intermediate = nn.Linear(
+            hidden_dims[-1] * out_H * out_H,
+            intermediate_dim,
+        )
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.2)
+
+        self.fc1 = nn.Linear(
+            intermediate_dim,
+            intermediate_dim,
+        )
+        self.fc2 = nn.Linear(
+            intermediate_dim,
+            latent_dim,
+        )
+
+    def forward(self, x):
+        x = self.encoder_conv(x)
+
+        # flatten, but ignore batch
+        x = torch.flatten(x, start_dim=1)
+
+        x = self.fc_intermediate(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x
 
 
 class Encoder(nn.Module):
@@ -121,17 +192,6 @@ class Encoder(nn.Module):
             intermediate_dim,
             latent_dim,
         )
-
-    def reparameterize(
-        self,
-        mu: torch.Tensor,
-        log_var: torch.Tensor,
-    ) -> torch.Tensor:
-
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-
-        return eps * std + mu
 
     def forward(self, x):
         x = self.encoder_conv(x)
@@ -268,7 +328,7 @@ class Discriminator(nn.Module):
         q_bar_score = self.discriminator(q_bar)
         q_score = self.discriminator(q)        
         return q_score, q_bar_score
-        
+
 
 class VAE(nn.Module):
 

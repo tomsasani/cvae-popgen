@@ -13,6 +13,16 @@ import torchvision
 # our imports
 import global_vars
 
+def calculate_channel_means(batch):
+    bsz, c, h, w = batch.shape
+    # get means across the batch, per channel
+    means = torch.mean(batch, dim=(0, 2, 3))
+    stds = torch.std(batch, dim=(0, 2, 3))
+    # make sure we don't divide by 0 when adjusting for stdev
+    stds[-1] = 1
+    # then, get means across the batch per channel
+    return means, stds
+
 
 def sort_min_diff_numpy(X):
     '''this function takes in a SNP matrix with indv on rows and returns the same matrix with indvs sorted by genetic similarity.

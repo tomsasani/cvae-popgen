@@ -24,7 +24,6 @@ class Generator:
         param_names,
         seed,
         convert_to_rgb: bool = False,
-        permute: bool = False,
         n_snps: int = 32,
         seqlen: int = global_vars.L,
         filter_singletons: bool = False,
@@ -87,8 +86,6 @@ class Generator:
             region = util.sort_min_diff_numpy(
                 region,
             )
-
-        # region = util.normalize_ndarray(region)
 
         region = np.expand_dims(region, axis=0)
 

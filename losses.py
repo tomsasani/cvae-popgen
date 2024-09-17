@@ -28,7 +28,13 @@ class VAELoss(nn.Module):
         recons_loss = torch.mean(torch.sum(recons_loss, dim=(1, 2, 3)))
 
         # compute average per-image KL loss across the batch
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1))
+        kld_loss = torch.mean(
+            -0.5
+            * torch.sum(
+                1 + log_var - torch.square(mu) - torch.exp(log_var),
+                dim=1,
+            )
+        )
 
         loss = recons_loss + self.kld_weight * kld_loss
         return loss

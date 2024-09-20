@@ -79,7 +79,7 @@ cifar_fg_data = torch.utils.data.Subset(cifar_train, fg_idxs)
 cifar_bg_data = torch.utils.data.Subset(cifar_train, bg_idxs)
 
 # randomly augment with probability p
-prob = 0.5
+prob = 0.1
 
 def output_corrupted(
     tg_dataloader,

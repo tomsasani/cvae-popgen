@@ -1,4 +1,6 @@
 data/
+fig/
 slim/output/
 __pycache__/
 .snakemake/
+*.png

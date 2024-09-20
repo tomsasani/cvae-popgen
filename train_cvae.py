@@ -6,6 +6,8 @@ import torchvision
 
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score, accuracy_score
+from sklearn.linear_model import LogisticRegressionCV
 import numpy as np
 import matplotlib.pyplot as plt
 import tqdm
@@ -14,91 +16,169 @@ import pandas as pd
 from typing import List
 import models
 import losses
+import itertools
 
 
-BATCH_SIZE = 100
-LATENT_DIM = 2
-INTERMEDIATE_DIM = 128
+KERNEL_SIZE = (5, 5)
+PADDING = (2, 2)
+OUTPUT_PADDING = (1, 1)
+STRIDE = (2, 2)
+
 H, W = 64, 64
 CHANNELS = 1
 INPUT_DIM = H * W
 LR = 1e-3
-EPOCHS = 25
-HIDDEN_DIMS = [32, 64, 128]#, 128, 256]
+EPOCHS = 10
+HIDDEN_DIMS = [32, 64, 128]
+
+BATCH_SIZE = 128
+LATENT_DIM_S = 2
+LATENT_DIM_Z = 4
+INTERMEDIATE_DIM = 128
+
 DEVICE = torch.device("cuda")
 
 
-mnist_transform = transforms.Compose([
+def extract_celeb_data(dataset, ai, bi):
+
+    targets = dataset.attr
+
+    target_idxs = np.where(targets[:, ai] + targets[:, bi] == 1)[0]
+    background_idxs = np.where(targets[:, ai] + targets[:, bi] == 0)[0]
+
+    # target_idxs = np.random.choice(target_idxs, size=1_000, replace=False)
+    # background_idxs = np.random.choice(background_idxs, size=1_000, replace=False)
+
+    target = torch.utils.data.Subset(dataset, target_idxs)
+    background = torch.utils.data.Subset(dataset, background_idxs)
+
+    print (target_idxs.shape, background_idxs.shape)
+
+    return target, background
+
+def extract_msprime_data(dataset):
+
+    target_idxs, background_idxs = [], []
+    for i, (x, y) in tqdm.tqdm(enumerate(dataset)):
+        if y > 0:
+            target_idxs.append(i)
+        else:
+            background_idxs.append(i)
+
+    target = torch.utils.data.Subset(dataset, target_idxs)
+    background = torch.utils.data.Subset(dataset, background_idxs)
+
+    return target, background
+
+
+celeb_transform = transforms.Compose(
+    [
         transforms.Grayscale(),
         transforms.Resize(size=(H, W)),
-        transforms.ToTensor(),
-])
-
-
-
-train_tg = torchvision.datasets.ImageFolder(
-    "data/corrupted/train/",
-    transform=mnist_transform,
+        transforms.ToImage(),
+        transforms.ToDtype(torch.float32, scale=True),
+    ]
 )
-# test_tg = torchvision.datasets.ImageFolder(
-#     "data/corrupted/test/",
-#     transform=mnist_transform,
+
+# celeb_train = CelebA(
+#     root="data",
+#     split="train",
+#     target_type="attr",
+#     transform=celeb_transform,
+#     download=True,
 # )
-train_bg = torchvision.datasets.ImageFolder(
-    "data/background_frog/",
-    transform=mnist_transform,
+
+# celeb_val = CelebA(
+#     root="data",
+#     split="valid",
+#     target_type="attr",
+#     transform=celeb_transform,
+#     download=True,
+# )
+
+# glasses_attr_idx = celeb_train.attr_names.index("Eyeglasses")
+# hat_attr_idx = celeb_train.attr_names.index("Wearing_Hat")
+
+# tg_train, bg_train = extract_celeb_data(celeb_train, glasses_attr_idx, hat_attr_idx)
+# tg_test, bg_test = extract_celeb_data(celeb_val, glasses_attr_idx, hat_attr_idx)
+
+
+# msprime_data = torchvision.datasets.ImageFolder(
+#     "data/simulated/target/",
+#     transform=celeb_transform,
+# )
+
+# msprime_train, msprime_test = torch.utils.data.random_split(msprime_data, [0.8, 0.2])
+# tg_train, bg_train = extract_msprime_data(msprime_train)
+# tg_test, bg_test = extract_msprime_data(msprime_test)
+
+
+target = torchvision.datasets.ImageFolder(
+    "data/corrupted/target/",
+    transform=celeb_transform,
 )
+background = torchvision.datasets.ImageFolder(
+    "data/corrupted/background/",
+    transform=celeb_transform,
+)
+
+tg_train, tg_test = torch.utils.data.random_split(target, [0.8, 0.2])
+bg_train, bg_test = torch.utils.data.random_split(background, [0.8, 0.2])
 
 
 # NOTE: these must be shuffled!!!
-tg_train_dataloader = DataLoader(dataset=train_tg, batch_size=BATCH_SIZE, shuffle=True)
-# tg_test_dataloader = DataLoader(dataset=test_tg, batch_size=BATCH_SIZE)
-bg_train_dataloader = DataLoader(dataset=train_bg, batch_size=BATCH_SIZE, shuffle=True)
+tg_train = DataLoader(dataset=tg_train, batch_size=BATCH_SIZE, shuffle=True)
+tg_test = DataLoader(dataset=tg_test, batch_size=BATCH_SIZE, shuffle=True)
+bg_train = DataLoader(dataset=bg_train, batch_size=BATCH_SIZE, shuffle=True)
+bg_test = DataLoader(dataset=bg_test, batch_size=BATCH_SIZE, shuffle=True)
 
 qs_encoder = models.Encoder(
     in_channels=CHANNELS,
-    latent_dim=LATENT_DIM,
-    kernel_size=3,
-    stride=2,
-    padding=1,
+    latent_dim=LATENT_DIM_S,
+    kernel_size=KERNEL_SIZE,
+    stride=STRIDE,
+    padding=PADDING,
     hidden_dims=HIDDEN_DIMS,
     intermediate_dim=INTERMEDIATE_DIM,
-    in_H=H,
+    in_HW=(H, W),
 )
 
 qz_encoder = models.Encoder(
     in_channels=CHANNELS,
-    latent_dim=LATENT_DIM,
-    kernel_size=3,
-    stride=2,
-    padding=1,
+    latent_dim=LATENT_DIM_Z,
+    kernel_size=KERNEL_SIZE,
+    stride=STRIDE,
+    padding=PADDING,
     hidden_dims=HIDDEN_DIMS,
     intermediate_dim=INTERMEDIATE_DIM,
-    in_H=H,
+    in_HW=(H, W),
 )
 
 decoder = models.Decoder(
     out_channels=CHANNELS,
-    latent_dim=LATENT_DIM * 2,
-    kernel_size=3,
-    stride=2,
-    padding=1,
-    output_padding=1,
+    latent_dim=LATENT_DIM_S + LATENT_DIM_Z,
+    kernel_size=KERNEL_SIZE,
+    stride=STRIDE,
+    padding=PADDING,
+    output_padding=OUTPUT_PADDING,
     hidden_dims=HIDDEN_DIMS,
     intermediate_dim=INTERMEDIATE_DIM,
-    in_H=H,
+    in_HW=(H, W),
 )
 
-model = models.CVAE(s_encoder=qs_encoder, z_encoder=qz_encoder, decoder=decoder)
+model = models.CVAE(
+    s_encoder=qs_encoder,
+    z_encoder=qz_encoder,
+    decoder=decoder,
+)
 model = model.to(DEVICE)
 
 pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print (pytorch_total_params)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR, )
 
 loss_fn = losses.CVAELoss()
-
 
 def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
     
@@ -107,9 +187,6 @@ def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
     n_batches = len(tg_dataloader)
     total_loss = 0
     batch_size = None
-
-    # NOTE: this assumes that we have more (or the same number)
-    # of targets than we have backgrounds
 
     # get iterator over backgrounds
     bg_iterator = iter(bg_dataloader)
@@ -124,6 +201,7 @@ def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
         # if we've reached the end of the background data, just start
         # at the beginning and grab another random batch.
         except StopIteration:
+            # print ("Can't iterate over background.")
             # start over iterating over the backgrounds
             bg_iterator = iter(bg_dataloader)
             bg_x, bg_y = next(bg_iterator)
@@ -135,7 +213,11 @@ def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
         # NOTE: should do this randomly
         bg_bsz, tg_bsz = bg_x.shape[0], tg_x.shape[0]
         if bg_bsz > tg_bsz:
-            bg_x = bg_x[:tg_bsz, :, :, :]
+            idxs = np.random.choice(bg_bsz, size=tg_bsz)
+            bg_x = bg_x[idxs, :, :, :]
+        elif bg_bsz < tg_bsz:
+            idxs = np.random.choice(tg_bsz, size=bg_bsz)
+            tg_x = tg_x[idxs, :, :, :]
 
         tg_x, bg_x = tg_x.to(DEVICE), bg_x.to(DEVICE)
 
@@ -156,18 +238,36 @@ def test_loop(model, tg_dataloader, bg_dataloader, loss_fn):
 
     n_batches = len(tg_dataloader)
     total_loss = 0
-    tg_iterator = iter(tg_dataloader)
+    bg_iterator = iter(bg_dataloader)
 
     with torch.no_grad():
         batch_size = None
         # NOTE: this only works when batch sizes are identical in the
         # two iterators
-        for i, (bg_x, bg_y) in tqdm.tqdm(enumerate(bg_dataloader)):
+        for i, (tg_x, tg_y) in tqdm.tqdm(enumerate(tg_dataloader)):
             
-            tg_x, tg_y = next(tg_iterator)
-            
+            try:
+                bg_x, bg_y = next(bg_iterator)
+            # if we've reached the end of the background data, just start
+            # at the beginning and grab another random batch.
+            except StopIteration:
+                # print ("Can't iterate over background.")
+                # start over iterating over the backgrounds
+                bg_iterator = iter(bg_dataloader)
+                bg_x, bg_y = next(bg_iterator)
+
             if batch_size is None:
                 batch_size = tg_x.shape[0]
+
+            # if batch sizes mismatch, subset
+            # NOTE: should do this randomly
+            bg_bsz, tg_bsz = bg_x.shape[0], tg_x.shape[0]
+            if bg_bsz > tg_bsz:
+                idxs = np.random.choice(bg_bsz, size=tg_bsz)
+                bg_x = bg_x[idxs, :, :, :]
+            elif bg_bsz < tg_bsz:
+                idxs = np.random.choice(tg_bsz, size=bg_bsz)
+                tg_x = tg_x[idxs, :, :, :]
 
             tg_x, bg_x = tg_x.to(DEVICE), bg_x.to(DEVICE)
 
@@ -178,36 +278,50 @@ def test_loop(model, tg_dataloader, bg_dataloader, loss_fn):
     return total_loss / (n_batches * batch_size)
 
 
-# def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
+def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
 
-#     model.eval()
-#     tg_iterator = iter(tg_dataloader)
-#     with torch.no_grad():
-#         batch_size = None
-#         # NOTE: this only works when batch sizes are identical in the
-#         # two iterators
-#         for i, (bg_x, bg_y) in tqdm.tqdm(enumerate(bg_dataloader)):
-#             tg_x, tg_y = next(tg_iterator)
-#             # add batch dimension to single example
-#             tg_x = torch.unsqueeze(tg_x[0].to(DEVICE), dim=0)
-#             bg_x = torch.unsqueeze(bg_x[0].to(DEVICE), dim=0)
-#             cvae_dict = model(tg_x, bg_x)
-#             tg_out = cvae_dict["tg_out"]
-        
-#     x = x.view(1, CHANNELS, H, W).cpu().numpy()
-#     x_hat = x_hat.view(1, CHANNELS, H, W).cpu().numpy()
+    model.eval()
+    bg_iterator = iter(bg_dataloader)
+    with torch.no_grad():
+        batch_size = None
+        # NOTE: this only works when batch sizes are identical in the
+        # two iterators
+        for i, (tg_x, tg_y) in tqdm.tqdm(enumerate(tg_dataloader)):
+            try:
+                bg_x, bg_y = next(bg_iterator)
+            # if we've reached the end of the background data, just start
+            # at the beginning and grab another random batch.
+            except StopIteration:
+                # start over iterating over the backgrounds
+                bg_iterator = iter(bg_dataloader)
+                bg_x, bg_y = next(bg_iterator)
+            # add batch dimension to single example
+            tg_x = torch.unsqueeze(tg_x[0].to(DEVICE), dim=0)
+            bg_x = torch.unsqueeze(bg_x[0].to(DEVICE), dim=0)
+            cvae_dict = model(tg_x, bg_x)
+            tg_x_hat, bg_x_hat, fg_x_hat = cvae_dict["tg_out"], cvae_dict["bg_out"], cvae_dict["fg_out"]
+            break
 
-#     x = np.transpose(x, (0, 2, 3, 1))
-#     x_hat = np.transpose(x_hat, (0, 2, 3, 1))
+    f, axarr = plt.subplots(2, 2, figsize=(8, 8))
 
-#     f, (ax1, ax2) = plt.subplots(1, 2)
-#     ax1.imshow(x[0])
-#     ax2.imshow(x_hat[0])
-#     ax1.set_title("Original image")
-#     ax2.set_title("Reconstructed image")
-#     f.tight_layout()
-#     f.savefig(plot_name, dpi=200)
-#     plt.close()
+    for ij, x, name in zip(
+        ((0, 0), (0, 1), (1, 0), (1, 1)),
+        (tg_x, fg_x_hat, tg_x_hat, bg_x_hat),
+        (
+            "Original",
+            "Reconstructed from s",
+            "Reconstructed from s + z",
+            "Reconstructed from z",
+        ),
+    ):
+        i, j = ij
+        x = x.view(1, CHANNELS, H, W).cpu().numpy()
+        x = np.transpose(x, (0, 2, 3, 1))
+        axarr[i, j].imshow(x[0])
+        axarr[i, j].set_title(name)
+    f.tight_layout()
+    f.savefig(plot_name, dpi=200)
+    plt.close()
 
 
 print("Start training VAE...")
@@ -215,12 +329,10 @@ print("Start training VAE...")
 res = []
 
 for epoch in range(EPOCHS):
-    # plot_example(model, tg_valid_dataloader, plot_name=f"fig/reconstructions/{epoch}.png")
-    # print (model.qs.fc_intermediate.weight)
-     #print (model.qz.fc_intermediate.weight)
-    train_loss = train_loop(model, tg_train_dataloader, bg_train_dataloader, loss_fn, optimizer)
-    # test_loss = test_loop(model, tg_valid_dataloader, bg_valid_dataloader, loss_fn)
-    test_loss = 0
+    plot_example(model, tg_train, bg_train, plot_name=f"fig/reconstructions/{epoch}.png")
+   
+    train_loss = train_loop(model, tg_train, bg_train, loss_fn, optimizer)
+    test_loss = test_loop(model, tg_test, bg_test, loss_fn)
     for loss, loss_name in zip((train_loss, test_loss), ("train", "test")):
         res.append({"epoch": epoch, "loss_kind": loss_name, "loss_val": loss,})
 
@@ -246,46 +358,59 @@ print("Finish!!")
 
 model.eval()
 
-f, ax = plt.subplots()
 
 reps = []
 labels = []
-bg_iterator = iter(bg_train_dataloader)
+bg_iterator = iter(bg_test)
 with torch.no_grad():
-    for i, (tg_x, tg_y) in tqdm.tqdm(enumerate(tg_train_dataloader)):
-
-        if i > 20: break
+    for i, (tg_x, tg_y) in tqdm.tqdm(enumerate(tg_test)):
+        if i > 1_000: break
         try:
             bg_x, bg_y = next(bg_iterator)
         except StopIteration:
-            bg_iterator = iter(bg_train_dataloader)
+            bg_iterator = iter(bg_test)
             bg_x, bg_y = next(bg_iterator)
 
+        bg_bsz, tg_bsz = bg_x.shape[0], tg_x.shape[0]
+        if bg_bsz > tg_bsz:
+            bg_x = bg_x[:tg_bsz, :, :, :]
+            bg_y = bg_y[:tg_bsz]
+        elif bg_bsz < tg_bsz:
+            tg_x = tg_x[:bg_bsz, :, :, :]
+            tg_y = tg_y[:bg_bsz]
         tg_x, bg_x = tg_x.to(DEVICE), bg_x.to(DEVICE)
+
         cvae_dict = model(tg_x, bg_x)
         # extract salient z
         salient_z = cvae_dict["tg_s"].cpu().numpy()
         reps.append(salient_z)
         labels.extend(list(tg_y.cpu().numpy()))
 
-reps = np.concatenate(reps)
-labels = np.array(labels)
+reps = np.concatenate(reps, axis=0)
+labels = np.array(labels)# [:, glasses_attr_idx]
 
-clf = PCA(n_components=2)
-X_new = clf.fit_transform(reps)
-ax.scatter(reps[:, 0], reps[:, 1], c=labels)
+clf = LogisticRegressionCV(cv=5)
+clf.fit(reps, labels)
+preds = clf.predict(reps)
 
+f, ax = plt.subplots()
+if LATENT_DIM_S > 2:
+    clf = PCA(n_components=2)
+    reps = clf.fit_transform(reps)
+ax.scatter(reps[:, 0], reps[:, 1], c=labels, alpha=0.5)
+ax.set_title(round(accuracy_score(labels, preds), 3))
 f.savefig("coords.png", dpi=200)
 
 def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=8):
 
-    f, axarr = plt.subplots(n, n)
+    f, axarr = plt.subplots(n, n, figsize=(8, 8))
     for i, y in enumerate(np.linspace(*r1, n)):
         for j, x in enumerate(np.linspace(*r0, n)):
             # sample a salient vector
             z = torch.Tensor([[x, y]]).to(DEVICE)
             # sample 0s for the irrelevant vector
-            x_hat = model.decoder(torch.cat((z, torch.zeros_like(z)), dim=-1))
+            z_ = torch.Tensor([[0] * LATENT_DIM_Z]).to(DEVICE)
+            x_hat = model.decoder(torch.cat((z, z_), dim=1))
             x_hat = x_hat.to('cpu').detach().numpy()[0, :, :]
             axarr[i, j].imshow(np.transpose(x_hat, (1, 2, 0)))
             axarr[i, j].set_xticks([])
@@ -294,5 +419,5 @@ def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=8):
     plt.subplots_adjust(wspace=0, hspace=0)
     f.savefig("recons.png")
 
-
-plot_reconstructed(model)
+if LATENT_DIM_S == 2:
+    plot_reconstructed(model)

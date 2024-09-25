@@ -47,10 +47,9 @@ class FinetuneResnet(nn.Module):
         pretrained_model,
         representation_dims: int = 512,
         latent_dims: int = 3,
+        apply_norm: bool = False,
     ):
         super(FinetuneResnet, self).__init__()
-
-        pretrained_model.fc = nn.Identity()
 
         self.representation = pretrained_model
         self.latent = nn.Sequential(
@@ -61,17 +60,21 @@ class FinetuneResnet(nn.Module):
             )
         self.relu = nn.ReLU()
 
+        self.apply_norm = apply_norm
+
     def forward(self, x):
         # produce output of final conv layer/avg pool
         representation = self.representation(x)
 
         # relu non-linearity in encoder
         representation = self.relu(representation)
-        
+        if self.apply_norm:
+            representation = torch.nn.functional.normalize(representation, p=2, dim=1)
         latent = self.latent(representation)        
         latent = self.relu(latent)
-        
-        return latent
+        if self.apply_norm:
+            latent = torch.nn.functional.normalize(latent, p=2, dim=1)
+        return representation, latent
 
 class ConvBlock2D(nn.Module):
 
@@ -85,6 +88,7 @@ class ConvBlock2D(nn.Module):
         padding: Union[int, Tuple[int]],
         batch_norm: bool = True,
         activation: bool = True,
+        bias: bool = False,
     ):
         super(ConvBlock2D, self).__init__()
 
@@ -94,7 +98,7 @@ class ConvBlock2D(nn.Module):
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
-            bias=False,
+            bias=bias,
         )
 
         relu = nn.LeakyReLU(0.2)
@@ -159,7 +163,7 @@ class CNN(nn.Module):
         padding: int = 1,
         hidden_dims: List[int] = None,
         intermediate_dim: int = 128,
-        in_H: int = 32,
+        in_HW: Tuple[int] = (32, 32),
     ) -> None:
         super(CNN, self).__init__()
 
@@ -169,7 +173,16 @@ class CNN(nn.Module):
             hidden_dims = [16, 32, 64, 128, 256]
 
         # figure out final size of image after convs
-        out_H = int(in_H / (2 ** len(hidden_dims)))
+        out_H, out_W = in_HW
+        out_W //= 2 ** len(hidden_dims)
+
+        # image height will only decrease if we're using square filters
+        if type(kernel_size) is int or (
+            len(kernel_size) > 1
+            and kernel_size[0] == kernel_size[1]
+            and kernel_size[0] > 1
+        ):
+            out_H //= 2 ** len(hidden_dims)
 
         encoder_blocks = []
         for h_dim in hidden_dims:
@@ -180,6 +193,9 @@ class CNN(nn.Module):
                     kernel_size=kernel_size,
                     stride=stride,
                     padding=padding,
+                    activation=True,
+                    batch_norm=True,
+                    bias=True,
                 )
 
             encoder_blocks.append(block)
@@ -189,7 +205,7 @@ class CNN(nn.Module):
         self.encoder_conv = nn.Sequential(*encoder_blocks)
 
         self.fc_intermediate = nn.Linear(
-            hidden_dims[-1] * out_H * out_H,
+            hidden_dims[-1] * out_H * out_W,
             intermediate_dim,
         )
         self.relu = nn.ReLU()
@@ -212,11 +228,11 @@ class CNN(nn.Module):
 
         x = self.fc_intermediate(x)
         x = self.relu(x)
-        # x = self.dropout(x)
+        x = self.dropout(x)
 
         x = self.fc1(x)
         x = self.relu(x)
-        # x = self.dropout(x)
+        x = self.dropout(x)
         x = self.fc2(x)
 
         return x
@@ -253,7 +269,6 @@ class Encoder(nn.Module):
             and kernel_size[0] > 1
         ):
             out_H //= 2 ** len(hidden_dims)
-
 
         encoder_blocks = []
         for h_dim in hidden_dims:
@@ -292,9 +307,9 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         x = self.encoder_conv(x)
-
         # flatten, but ignore batch
         x = torch.flatten(x, start_dim=1)
+
 
         x = self.fc_intermediate(x)
         x = self.relu(x)
@@ -378,11 +393,20 @@ class Decoder(nn.Module):
         final_block = [
             ConvTransposeBlock2D(
                 in_channels=hidden_dims[-1],
-                out_channels=out_channels,
+                out_channels=hidden_dims[-1],
                 kernel_size=kernel_size,
                 stride=stride,
                 padding=padding,
                 output_padding=output_padding,
+                batch_norm=True,
+                activation=True,
+            ),
+            ConvBlock2D(
+                in_channels=hidden_dims[-1],
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=(1, 1),
+                padding=padding,
                 batch_norm=False,
                 activation=False,
             ),
@@ -405,35 +429,48 @@ class Decoder(nn.Module):
         x = self.final_block(x)
         return x
 
+
 class Discriminator(nn.Module):
-    def __init__(self, latent_dim: int = 2):
+    def __init__(self, latent_dim_s: int = 2, latent_dim_z: int = 4):
         super(Discriminator, self).__init__()
 
         self.discriminator = nn.Sequential(
-                nn.Linear(latent_dim, 1),
+                nn.Linear(latent_dim_s + latent_dim_z, 1),
                 nn.Sigmoid(),
             )
-    def forward(self, z):
-        N, L = z.shape
+    def forward(self, tg_s, tg_z):
 
+        # get shape of z, where N is batch
+        # size and L is size of total latent space
+        N, _ = tg_z.shape
+
+        # if our batch size is odd, subset the batch
+        if N % 2 != 0:
+            N -= 1
+            tg_z = tg_z[:N]
+            tg_s = tg_s[:N]
+        
         half_N = int(N / 2)
-        half_L = int(L / 2)
 
-        z1 = z[:half_N, :half_L]
-        z2 = z[half_N:, :half_L]
-        s1 = z[:half_N, half_L:]
-        s2 = z[half_N:, half_L:]
-
-        q_bar = torch.cat(
-            [torch.cat([s1, z2], dim=1),
-            torch.cat([s2, z1], dim=1)],
-            dim=0)
+        # first half of batch of irrelevant latent space
+        z1 = tg_z[:half_N, :]
+        z2 = tg_z[half_N:, :]
+        s1 = tg_s[:half_N, :]
+        s2 = tg_s[half_N:, :]
+        
         q = torch.cat(
             [torch.cat([s1, z1], dim=1),
             torch.cat([s2, z2], dim=1)],
             dim=0)
+        
+        q_bar = torch.cat(
+            [torch.cat([s1, z2], dim=1),
+            torch.cat([s2, z1], dim=1)],
+            dim=0)
+        
         q_bar_score = self.discriminator(q_bar)
-        q_score = self.discriminator(q)        
+        q_score = self.discriminator(q)
+
         return q_score, q_bar_score
 
 
@@ -481,7 +518,7 @@ class CVAE(nn.Module):
         s_encoder,
         z_encoder,
         decoder,
-        disentangle: bool = False,
+        discriminator,
     ):
         super(CVAE, self).__init__()
 
@@ -490,6 +527,8 @@ class CVAE(nn.Module):
         self.qz = z_encoder
         # instantiate one shared decoder
         self.decoder = decoder
+        # instantitate the disrimintator
+        self.discriminator = discriminator
 
     def reparameterize(
         self,
@@ -516,7 +555,6 @@ class CVAE(nn.Module):
 
         # step 2: pass background features through
         # the irrelevant and salient encoders
-
         bg_z_mu, bg_z_log_var = self.qz(bg_inputs)
         bg_z = self.reparameterize(bg_z_mu, bg_z_log_var)
 
@@ -531,8 +569,12 @@ class CVAE(nn.Module):
         # we decode the background outputs using only the irrelevant
         # features
         bg_outputs = self.decoder(torch.cat([torch.zeros_like(bg_s), bg_z], dim=1))
-
+        # we decode the "foreground" using just the salient features
         fg_outputs = self.decoder(torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1))
+
+
+        # step 4: (optional) discriminate
+        q_score, q_bar_score = self.discriminator(tg_s, tg_z)
 
 
         out_dict = {
@@ -555,6 +597,9 @@ class CVAE(nn.Module):
             "bg_z": bg_z,
             "bg_z_mu": bg_z_mu,
             "bg_z_log_var": bg_z_log_var,
+
+            "q_score": q_score,
+            "q_bar_score": q_bar_score,
         }
 
         return out_dict
@@ -569,8 +614,8 @@ if __name__ == "__main__":
     INTERMEDIATE_DIM = 64
     IN_HW = (64, 64)# (100, 32)
     HIDDEN_DIMS = [32, 64, 128, 256]
-    LATENT_S = 2
-    LATENT_Z = 4
+    LATENT_S = 5
+    LATENT_Z = 10
 
     s_encoder = Encoder(
         in_channels=3,
@@ -596,29 +641,6 @@ if __name__ == "__main__":
 
     decoder = Decoder(
         out_channels=3,
-        latent_dim=LATENT_S,
-        kernel_size=KERNEL_SIZE,
-        stride=STRIDE,
-        padding=PADDING,
-        intermediate_dim=INTERMEDIATE_DIM,
-        output_padding=OUTPUT_PADDING,
-        in_HW=IN_HW,
-        hidden_dims=HIDDEN_DIMS,
-    )
-
-    model = VAE(encoder=s_encoder, decoder=decoder,)
-    model = model.to("cpu")
-
-    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print (pytorch_total_params)
-
-    test = torch.rand(size=(100, 3, 64, 64)).to("cpu")
-
-    out, mu, log_var, z = model(test)
-    print (out.shape)
-
-    decoder = Decoder(
-        out_channels=3,
         latent_dim=LATENT_S + LATENT_Z,
         kernel_size=KERNEL_SIZE,
         stride=STRIDE,
@@ -628,9 +650,15 @@ if __name__ == "__main__":
         in_HW=IN_HW,
         hidden_dims=HIDDEN_DIMS,
     )
-    print (decoder.final_dim)
 
-    model = CVAE(s_encoder=s_encoder, z_encoder=z_encoder, decoder=decoder,)
+    discriminator = Discriminator(latent_dim_s=LATENT_S, latent_dim_z=LATENT_Z)
+
+    model = CVAE(
+        s_encoder=s_encoder,
+        z_encoder=z_encoder,
+        decoder=decoder,
+        discriminator=discriminator,
+    )
     model = model.to("cpu")
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

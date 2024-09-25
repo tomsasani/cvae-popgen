@@ -96,6 +96,33 @@ def check_for_missing_data(
     return np.sum(batches_with_missing)
 
 
+def convert_to_af(X: np.ndarray):
+    """convert diploid image to 2-channel AF and dists
+
+    Args:
+        X (np.ndarray): _description_
+    """
+    C, H, W = X.shape
+
+    X_new = np.zeros((3, W))
+
+    gts = X[0, :, :]
+    ac =  np.sum(gts, axis=0)
+    an = gts.shape[0]
+    af = ac / an
+
+
+    assert np.max(af) <= 0.5
+    af *= 2
+
+    X_new[0] = af
+    X_new[1] = X[1, 0, :]
+
+    return X_new
+
+
+
+
 def process_region(
     X: np.ndarray,
     positions: np.ndarray,
@@ -210,6 +237,36 @@ def major_minor(matrix):
     matrix[matrix == 0] = -1
 
     return matrix
+
+
+def average_crops(model, batch):
+    bsz, c, ncrops, h, w = batch.shape
+    batch = batch.permute(0, 2, 1, 3, 4)
+    # merge ncrops and batchsize
+    batch_reshaped = batch.reshape(bsz * ncrops, c, h, w)
+    enc, proj = model(batch_reshaped)  # fuse batch size and ncrops
+    _, enc_dims = enc.shape
+    _, proj_dims = proj.shape
+    # separate ncrops and batchsize again
+    enc_reshaped = enc.reshape(bsz, ncrops, enc_dims)
+    proj_reshaped = proj.reshape(bsz, ncrops, proj_dims)
+    enc_avg = enc_reshaped.mean(1)  # avg over crops
+    proj_avg = proj_reshaped.mean(1)  # avg over crops
+    return enc_avg, proj_avg
+
+
+class MultiCropTransform:
+    """Create n random crops of the same image.
+    returns shape (bsz, n_views, ...)"""
+    def __init__(self, transform, n: int = 2):
+        self.transform = transform
+        self.n = n
+
+    def __call__(self, x):
+        stack = []
+        for _ in range(self.n):
+            stack.append(self.transform(x))
+        return torch.stack(stack, dim=1)
 
 
 if __name__ == "__main__":

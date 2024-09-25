@@ -78,7 +78,7 @@ class Generator:
             positions,
             convert_to_rgb=self.convert_to_rgb,
             n_snps=self.n_snps,
-            norm_len=self.seqlen,
+            norm_len=global_vars.L,
             convert_to_diploid=self.convert_to_diploid,
         )
 
@@ -119,21 +119,20 @@ if __name__ == "__main__":
 
     # quick test
     generator = Generator(
-        demographies.simulate_exp,
-        ["rho"],
+        demographies.simulate_sweep,
+        ["Ne", "s", "n_haps", "end_freq"],
         42,
         convert_to_diploid=True,
         filter_singletons=False,
-        n_snps=32,
+        n_snps=128,
         sort=True,
-        permute=False,
         convert_to_rgb=True,
-        seqlen=50_000,
+        seqlen=100_000,
     )
 
     region = generator.sample_fake_region(
-        [64],
-        param_values=[1e-8],
+        [128],
+        param_values=[20_000, 0.01, 1, 0.05],
     )
     print("x", region.shape)
 

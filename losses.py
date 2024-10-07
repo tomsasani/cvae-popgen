@@ -6,6 +6,31 @@ import torch.nn.functional as F
 
 DEVICE = torch.device("cuda")
 
+
+class PoissonMultinomial(nn.Module):
+    def __init__(self):
+        super(PoissonMultinomial, self).__init__()
+
+        self.eps = 1e-6
+        self.rescale = False
+        self.total_weight = 1
+
+    def forward(self, y_pred, y_true, reduction: str = "none"):
+
+        n_kmers = y_pred.shape[1]
+
+        # add epsilon to protect against tiny values
+        y_true = y_true + self.eps
+        y_pred = y_pred + self.eps
+
+        multinomial_term = F.poisson_nll_loss(y_pred, y_true, log_input=True, reduction=reduction)
+
+        loss_raw = multinomial_term
+        
+
+        return loss_raw
+
+
 def mmd(x, y, gammas, device):
     gammas = gammas.to(device)
 
@@ -30,9 +55,11 @@ def gram_matrix(x, y, gammas):
 
 class VAELoss(nn.Module):
 
-    def __init__(self, kld_weight: float = 1):
+    def __init__(self, reconstruction_loss_fn, kld_weight: float = 1):
         super(VAELoss, self).__init__()
         self.kld_weight = kld_weight
+        self.loss_fn = reconstruction_loss_fn
+
 
     def forward(
         self,
@@ -41,17 +68,17 @@ class VAELoss(nn.Module):
         mu,
         log_var,
     ):
-        N, C, H, W = orig.shape
+        # N, C, H, W = orig.shape
 
         # compute per-pixel MSE loss
-        recons_loss = F.binary_cross_entropy(
+        recons_loss = F.mse_loss(
             recon,
             orig,
             reduction="none",
         )
-
+        # recons_loss = F.cosine_embedding_loss(recon, orig, torch.tensor([1]).to(DEVICE), reduction="none")
         # compute average of the per-pixel total loss for each image
-        recons_loss = torch.mean(torch.sum(recons_loss, dim=(1, 2, 3)))
+        recons_loss = torch.mean(torch.sum(recons_loss, dim=1))
 
         # compute average per-image KL loss across the batch
         kld_loss = torch.mean(
@@ -68,11 +95,12 @@ class VAELoss(nn.Module):
 
 class CVAELoss(nn.Module):
 
-    def __init__(self, kld_weight: float = 1):
+    def __init__(self, reconstruction_loss_fn, kld_weight: float = 1):
         super(CVAELoss, self).__init__()
 
         self.background_disentanglement_penalty = 10e3
         self.salient_disentanglement_penalty = 10e2
+        self.loss_fn = reconstruction_loss_fn
 
     def forward(
         self,
@@ -81,32 +109,29 @@ class CVAELoss(nn.Module):
         cvae_dict,
     ):
 
-        N, C, H, W = tg_inputs.shape
+        # N, C, H, W = tg_inputs.shape
 
         tg_outputs = cvae_dict["tg_out"]
-
-        # print (tg_inputs.min().item(), tg_inputs.max().item())
-        # print (tg_outputs.min().item(), tg_outputs.max().item())
-        # print (bg_inputs.min().item(), bg_inputs.max().item())
-        # print (bg_outputs.min().item(), bg_outputs.max().item())
-
-        MSE_tg = F.binary_cross_entropy(
+        MSE_tg = self.loss_fn(
             tg_outputs,
             tg_inputs,
             reduction="none",
         )
+        
         # compute average per-image loss across the batch
-        MSE_tg = torch.mean(torch.sum(MSE_tg, dim=(1, 2, 3)), dim=0)
+        MSE_tg = torch.mean(torch.sum(MSE_tg, dim=1), dim=0)
 
         bg_outputs = cvae_dict["bg_out"]
-        MSE_bg = F.binary_cross_entropy(
+        MSE_bg = self.loss_fn(
             bg_outputs,
             bg_inputs,
             reduction="none",
         )
+       
         # compute average per-image loss across the batch
-        MSE_bg = torch.mean(torch.sum(MSE_bg, dim=(1, 2, 3)), dim=0)
+        MSE_bg = torch.mean(torch.sum(MSE_bg, dim=1), dim=0)
 
+        # print (MSE_tg.item(), MSE_bg.item())
         # compute KL loss per image
         tg_s_log_var, tg_s_mu = cvae_dict["tg_s_log_var"], cvae_dict["tg_s_mu"]
         tg_z_log_var, tg_z_mu = cvae_dict["tg_z_log_var"], cvae_dict["tg_z_mu"]
@@ -124,13 +149,33 @@ class CVAELoss(nn.Module):
         # KLD_s_tg = -0.5 * torch.sum(1 + tg_s_log_var - tg_s_mu.pow(2) - tg_s_log_var.exp())
 
         # print (MSE_tg.item(), MSE_bg.item(), KLD_z_bg.item(), KLD_z_tg.item(), KLD_s_tg.item())
-
+        # print ([el.item() for el in [MSE_bg, MSE_tg, KLD_s_tg, KLD_z_bg, KLD_z_tg]])
         cvae_loss = (MSE_bg + KLD_z_bg) + (MSE_tg + KLD_z_tg + KLD_s_tg)
+        # print (cvae_loss.item())
 
         q_score, q_bar_score = cvae_dict["q_score"], cvae_dict["q_bar_score"]
+        discriminator_loss = (-torch.log(q_score) - torch.log(1 - q_bar_score)).mean()
+        # print ([(el.min().item(), el.max().item()) for el in [q_score, q_bar_score]])
 
-        discriminator_loss = (- torch.log(q_score) - torch.log(1 - q_bar_score)).mean()
+        # discriminator_loss = (- torch.log(q_score) - torch.log(1 - q_bar_score)).sum()
+        # print (discriminator_loss.item())
         cvae_loss += discriminator_loss
+
+        # gammas = torch.FloatTensor([10 ** x for x in range(-6, 7, 1)])
+        # # gammas = torch.FloatTensor([10 ** x for x in range(-10, 10, 1)])
+        # background_mmd_loss = self.background_disentanglement_penalty * mmd(
+        #     bg_z,
+        #     tg_z,
+        #     gammas=gammas,
+        #     device=DEVICE,
+        # )
+        # salient_mmd_loss = self.salient_disentanglement_penalty * mmd(
+        #     bg_s,
+        #     torch.zeros_like(bg_s),
+        #     gammas=gammas,
+        #     device=DEVICE,
+        # )
+        # cvae_loss += background_mmd_loss + salient_mmd_loss
 
         return cvae_loss
 

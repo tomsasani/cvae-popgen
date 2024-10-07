@@ -5,41 +5,6 @@ import torchvision
 import torchvision.transforms.functional as F
 
 
-class Basic1DCNN(nn.Module):
-    def __init__(self, in_W: int = 32, intermediate_dim: int = 128, latent_dim: int = 3):
-        super(Basic1DCNN, self).__init__()
-
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=(1, 5), padding="same")
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=(1, 5), padding="same")
-        self.pool = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)
-        self.flatten = nn.Flatten()
-        self.fc1 = nn.Linear(64 * (in_W // 4), intermediate_dim)
-        self.fc2 = nn.Linear(intermediate_dim, latent_dim)
-
-    def forward(self, x):
-
-        x = self.conv1(x)
-        x = self.relu(x)
-        x = self.pool(x)
-
-        x = self.conv2(x)
-        x = self.relu(x)
-        x = self.pool(x)
-
-        x = torch.amax(x, dim=2)
-
-        x = self.flatten(x)
-
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-
-        x = self.fc2(x)
-
-        return x
-
 class FinetuneResnet(nn.Module):
 
     def __init__(
@@ -127,6 +92,7 @@ class ConvTransposeBlock2D(nn.Module):
         output_padding: Union[int, Tuple[int]],
         batch_norm: bool = True,
         activation: bool = True,
+        bias: bool = False,
     ):
         super(ConvTransposeBlock2D, self).__init__()
 
@@ -137,7 +103,7 @@ class ConvTransposeBlock2D(nn.Module):
             stride=stride,
             padding=padding,
             output_padding=output_padding,
-            bias=False,
+            bias=bias,
         )
 
         relu = nn.LeakyReLU(0.2)
@@ -238,6 +204,83 @@ class CNN(nn.Module):
         return x
 
 
+class EncoderFC(nn.Module):
+    def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
+        super(EncoderFC, self).__init__()
+
+        layers = [
+            nn.Linear(in_W, hidden_dims[0]),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(hidden_dims[0]),
+        ]
+
+        for hi in range(1, len(hidden_dims)):
+            layers.extend(
+                [nn.Linear(hidden_dims[hi - 1], hidden_dims[hi]),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(
+                    hidden_dims[hi],
+                ),]
+            )
+
+
+        self.fc = nn.Sequential(*layers)
+
+
+        self.fc_mu = nn.Linear(
+            hidden_dims[-1],
+            latent_dim,
+        )
+        self.fc_var = nn.Linear(
+            hidden_dims[-1],
+            latent_dim,
+        )
+
+
+    def forward(self, x):
+        x = self.fc(x)
+    
+        mu, log_var = self.fc_mu(x), self.fc_var(x)
+
+        return [mu, log_var]
+
+
+class DecoderFC(nn.Module):
+    def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
+        super(DecoderFC, self).__init__()
+
+        bias = False
+
+        hidden_dims = hidden_dims[::-1]
+
+        layers = [
+            nn.Linear(latent_dim, hidden_dims[0]),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(hidden_dims[0]),
+        ]
+
+        for hi in range(1, len(hidden_dims)):
+            layers.extend([
+                nn.Linear(hidden_dims[hi - 1], hidden_dims[hi]),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(
+                    hidden_dims[hi],
+                ),]
+            )
+
+        self.fc = nn.Sequential(*layers)
+
+        self.fc_out = nn.Linear(hidden_dims[-1], in_W, bias=bias)
+        
+        self.softmax = nn.LogSoftmax(1)
+        self.softplus = nn.Softplus()
+
+    def forward(self, x):
+        x = self.fc(x)
+        x = self.fc_out(x)
+        # x = self.softplus(x)
+        return x
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -254,6 +297,7 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
 
         self.latent_dim = latent_dim
+        bias = False
 
         if hidden_dims is None:
             hidden_dims = [16, 32, 64, 128, 256]
@@ -281,6 +325,7 @@ class Encoder(nn.Module):
                 padding=padding,
                 batch_norm=True,
                 activation=True,
+                bias=bias,
             )
             encoder_blocks.append(block)
 
@@ -291,28 +336,35 @@ class Encoder(nn.Module):
         self.fc_intermediate = nn.Linear(
             hidden_dims[-1] * out_H * out_W,
             intermediate_dim,
+            bias=bias,
         )
 
         self.fc_mu = nn.Linear(
             intermediate_dim,
             latent_dim,
+            bias=bias,
         )
         self.fc_var = nn.Linear(
             intermediate_dim,
             latent_dim,
+            bias=bias,
         )
 
         self.relu = nn.LeakyReLU(0.2)
 
 
     def forward(self, x):
+        # print ("BEFORE ENCODING", x.min(), x.max())
         x = self.encoder_conv(x)
+        # print ("BEFORE FLATTENING", x.min(), x.max())
         # flatten, but ignore batch
         x = torch.flatten(x, start_dim=1)
-
+        # print ("AFTER FLATTENING", x.min(), x.max())
 
         x = self.fc_intermediate(x)
         x = self.relu(x)
+
+        # print ("AFTER INTERMEIDATE", x.min(), x.max())
 
         # split the result into mu and var components
         # of the latent Gaussian distribution
@@ -336,6 +388,8 @@ class Decoder(nn.Module):
         in_HW: Tuple[int] = (32, 32),
     ) -> None:
         super(Decoder, self).__init__()
+
+        bias = False
 
         if hidden_dims is None:
             hidden_dims = [16, 32, 64, 128, 256]
@@ -361,11 +415,13 @@ class Decoder(nn.Module):
         self.decoder_input = nn.Linear(
             latent_dim,
             intermediate_dim,
+            bias=bias,
         )
 
         self.decoder_upsize = nn.Linear(
             intermediate_dim,
             hidden_dims[-1] * out_H * out_W,
+            bias=bias,
         )
 
         decoder_blocks = []
@@ -383,6 +439,7 @@ class Decoder(nn.Module):
                 output_padding=output_padding,
                 batch_norm=True,
                 activation=True,
+                bias=bias,
             )
             decoder_blocks.append(block)
 
@@ -400,6 +457,7 @@ class Decoder(nn.Module):
                 output_padding=output_padding,
                 batch_norm=True,
                 activation=True,
+                bias=bias,
             ),
             ConvBlock2D(
                 in_channels=hidden_dims[-1],
@@ -409,6 +467,7 @@ class Decoder(nn.Module):
                 padding=padding,
                 batch_norm=False,
                 activation=False,
+                bias=bias,
             ),
             nn.Sigmoid(),
         ]
@@ -565,6 +624,7 @@ class CVAE(nn.Module):
 
         # decode the target outputs using both the salient and
         # irrelevant features
+
         tg_outputs = self.decoder(torch.cat([tg_s, tg_z], dim=1))
         # we decode the background outputs using only the irrelevant
         # features
@@ -607,65 +667,38 @@ class CVAE(nn.Module):
 
 if __name__ == "__main__":
 
-    KERNEL_SIZE = (5, 5) #(1, 5)
-    STRIDE = (2, 2) #(1, 2)
-    PADDING = (2, 2) #(0, 2)
-    OUTPUT_PADDING = (1, 1) #(0, 1)
-    INTERMEDIATE_DIM = 64
-    IN_HW = (64, 64)# (100, 32)
-    HIDDEN_DIMS = [32, 64, 128, 256]
-    LATENT_S = 5
-    LATENT_Z = 10
+    KERNEL_SIZE = (1, 3) #(1, 5)
+    STRIDE = (1, 2) #(1, 2)
+    PADDING = (0, 1) #(0, 2)
+    OUTPUT_PADDING = (0, 1) #(0, 1)
+    INTERMEDIATE_DIM = 128
+    IN_HW = (1, 16)# (100, 32)
+    HIDDEN_DIMS = [32]
+    LATENT_DIM = 2
 
-    s_encoder = Encoder(
-        in_channels=3,
-        latent_dim=LATENT_S,
-        kernel_size=KERNEL_SIZE,
-        stride=STRIDE,
-        padding=PADDING,
-        intermediate_dim=INTERMEDIATE_DIM,
-        in_HW=IN_HW,
+    encoder = EncoderFC(
+    latent_dim=LATENT_DIM,
+        in_W=96,
         hidden_dims=HIDDEN_DIMS,
+        
+)
+
+    decoder = DecoderFC(
+        latent_dim=LATENT_DIM,
+        in_W=96,
+        hidden_dims=HIDDEN_DIMS,
+        
     )
 
-    z_encoder = Encoder(
-        in_channels=3,
-        latent_dim=LATENT_Z,
-        kernel_size=KERNEL_SIZE,
-        stride=STRIDE,
-        padding=PADDING,
-        intermediate_dim=INTERMEDIATE_DIM,
-        in_HW=IN_HW,
-        hidden_dims=HIDDEN_DIMS,
-    )
-
-    decoder = Decoder(
-        out_channels=3,
-        latent_dim=LATENT_S + LATENT_Z,
-        kernel_size=KERNEL_SIZE,
-        stride=STRIDE,
-        padding=PADDING,
-        intermediate_dim=INTERMEDIATE_DIM,
-        output_padding=OUTPUT_PADDING,
-        in_HW=IN_HW,
-        hidden_dims=HIDDEN_DIMS,
-    )
-
-    discriminator = Discriminator(latent_dim_s=LATENT_S, latent_dim_z=LATENT_Z)
-
-    model = CVAE(
-        s_encoder=s_encoder,
-        z_encoder=z_encoder,
+    model = VAE(
+        encoder=encoder,
         decoder=decoder,
-        discriminator=discriminator,
     )
     model = model.to("cpu")
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print (pytorch_total_params)
 
-    x = torch.rand(size=(100, 3, 64, 64)).to("cpu")
-    x_ = torch.rand(size=(100, 3, 64, 64)).to("cpu")
+    x = torch.rand(size=(100, 96)).to("cpu")
 
-    cvae_dict = model(x, x_)
-    print ([(k, v.shape) for k,v in cvae_dict.items()])
+    print (model(x)[0].shape)

@@ -1,112 +1,167 @@
-import demographies
-import generator_fake
-import params
-import util
-import os
 import pathlib
 import numpy as np
+from PIL import Image
+import shutil
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from PIL import Image
+import tqdm
 
-# we'll only be changing the size of the "A" population at present,
-# after a bottleneck from a population size of N3
-PARAM_NAMES = ["N1", "N2", "T1", "T2", "growth"]
+from typing import List, Union
 
-# initialize basic engine
-engine = generator_fake.Generator(
-    demographies.simulate_exp,
-    PARAM_NAMES,
-    42,
-    convert_to_rgb=True,
-    n_snps=64,
-    convert_to_diploid=True,
-    seqlen=100_000,
-    sort=True,
-    filter_singletons=False,
-)
+def log2_transform(X: np.ndarray):
+    # assume shape is N, K
+    N, K = X.shape
+    # get sums across kmers for each sample
+    sample_sums = np.sum(X, axis=1)[:, None]
 
-sim_params = params.ParamSet()
+    # take log2 of sums
+    l2_sums = np.log2(sample_sums)
+
+    # multiply by log2 and divide by regular sum
+    X_new = X * l2_sums
+    X_new /= sample_sums
+
+    return X_new
+
+
+def allocate_signatures(
+    rng: np.random.default_rng,
+    bg_signatures: List[str],
+    fg_signatures: List[str] = [],
+    fg_fraction: float = 0.1,
+):
+    # figure out the total number of signatures we're adding
+    signatures = bg_signatures + fg_signatures
+
+    # randomly decide on the contributions of each background signature.
+    # the first proportion is randomly decided, and we bound the 
+    # total fraction of background signatures to be less than some threshold
+    # so that foreground signatures can take up the rest
+    bg_proportion = (1 - fg_fraction) if len(fg_signatures) > 0 else 1
+    proportions = [rng.uniform(0, bg_proportion)]
+    # first, allocate background signatures
+    while len(proportions) < len(bg_signatures) - 1:
+        prop = rng.uniform(0, bg_proportion - sum(proportions))
+        proportions.append(prop)
+
+    # if there are no foreground signatures, we allocate
+    # the remaining signature proportion to the final background
+    # signatures
+    if len(fg_signatures) == 0:
+        proportions.append(1 - sum(proportions))
+    # otherwise, we add a random amount of the final background
+    # signature, and then add foreground proportions
+    else:
+        # fill in necessary amount of final background signature
+        proportions.append(bg_proportion - sum(proportions))
+        while len(proportions) < len(bg_signatures) + len(fg_signatures) - 1:
+            proportions.append(rng.uniform(0, 1 - sum(proportions)))
+        proportions.append(1 - sum(proportions))
+
+
+    return dict(zip(signatures, proportions))
+
+
+cosmic = pd.read_csv("data/COSMIC_v3.4_SBS_GRCh38.txt", sep="\t")
+cosmic["base"] = cosmic["Type"].apply(lambda t: t.split("[")[-1].split("]")[0])
+cosmic = cosmic.sort_values("base")
+
 rng = np.random.default_rng(42)
 
-# define parameter values we'll use for target dataset,
-# in which we have a population size change in the admixed
-# population
-TG_PARAM_VALUES = [
-    [23_231, 29_962, 4_870, 581, 0.00531],  # YRI
-    [22_552, 3_313, 3_589, 1_050, 0.00535],  # CEU
-    [9_000, 5_000, 2_000, 350, 0.001],
-]  # CHB
+sig_names = cosmic.columns[1:]
 
-N_SMPS = 128
-TOTAL_REGIONS = 90_000
-target_regions = TOTAL_REGIONS / len(TG_PARAM_VALUES)
+N_BACKGROUND = 10_000
+BACKGROUND_SIGNATURES = ["SBS1", "SBS5", "SBS30"]
 
-for model_i in range(len(TG_PARAM_VALUES)):
-    counted = 0
-    while counted < target_regions:
+N_FOREGROUND = N_BACKGROUND // 2
+FOREGROUND_SIGNATURES = ["SBS18", "SBS12"]
 
-        param_values = TG_PARAM_VALUES[model_i]
+N_MUTATIONS = 100
 
-        region = engine.sample_fake_region(
-            [N_SMPS],
-            param_values=param_values,
+background_spectra = np.zeros((N_BACKGROUND, 96))
+
+ind = np.arange(96)
+
+f, axarr = plt.subplots(3, figsize=(8, 6))
+
+# create background data that is a combination of SBS1 and SBS5
+for i in tqdm.tqdm(range(N_BACKGROUND)):
+    
+    # randomly allocate proportions to each signatures
+    contributions = allocate_signatures(rng, BACKGROUND_SIGNATURES, [])
+    # print (contributions, sum(contributions.values()))
+    for signature, proportion in contributions.items():
+        # total mutations to be drawn from this signature
+        total_mutations = int(N_MUTATIONS * proportion)
+        # figure out which signature to sample from
+        mutation_probabilities = cosmic[signature].values
+        # draw a single mutation from a poisson distribution with probabilities
+        # equal to signature contributions of each mutation type
+        mutations_drawn = np.random.poisson(mutation_probabilities * total_mutations)
+        background_spectra[i] += mutations_drawn
+
+# background_spectra = log2_transform(background_spectra)
+# background_spectra = np.log1p(background_spectra)
+print (background_spectra.shape)
+# background_spectra = background_spectra / np.sum(background_spectra, axis=1)[:, None]
+# mmin, mmax = np.min(background_spectra, axis=1)[:, None], np.max(background_spectra, axis=1)[:, None]
+# background_spectra = (background_spectra - mmin) / (mmax - mmin)
+
+axarr[0].bar(ind, np.mean(background_spectra, axis=0), 1, yerr=np.std(background_spectra, axis=0))
+
+
+foreground_spectra = []
+ys = []
+for fg_i, fg_signatures in enumerate(FOREGROUND_SIGNATURES):
+    fg_spectra = np.zeros((N_FOREGROUND, 96))
+    for i in tqdm.tqdm(range(N_FOREGROUND)):
+        # randomly allocate proportions to each signature
+        contributions = allocate_signatures(
+            rng,
+            BACKGROUND_SIGNATURES,
+            [fg_signatures],
+            fg_fraction=0.05,
         )
+        # print (contributions, sum(contributions.values()))
+        for signature, proportion in contributions.items():
+            # total mutations to be drawn from this signature
+            total_mutations = int(N_MUTATIONS * proportion)
+            # figure out which signature to sample from
+            mutation_probabilities = cosmic[signature].values
+            # draw a single mutation from a poisson distribution with probabilities
+            # equal to signature contributions of each mutation type
+            mutations_drawn = np.random.poisson(mutation_probabilities * total_mutations)
+            fg_spectra[i] += mutations_drawn
+        ys.append(fg_i)
 
-        n_batches_zero_padded = util.check_for_missing_data(region) > 0
-      
-        if n_batches_zero_padded:
-            continue
+    # fg_spectra = log2_transform(fg_spectra)
+    # fg_spectra = np.log1p(fg_spectra)
+    # fg_spectra = fg_spectra / np.sum(fg_spectra, axis=1)[:, None]
+    mmin, mmax = np.min(fg_spectra, axis=1)[:, None], np.max(fg_spectra, axis=1)[:, None]
 
-        if counted % 100 == 0:
-            print(counted)
+    # fg_spectra = (fg_spectra - mmin) / (mmax - mmin)
+    axarr[fg_i + 1].bar(ind, np.mean(fg_spectra, axis=0), 1, yerr=np.std(fg_spectra, axis=0))
+    foreground_spectra.append(fg_spectra)
 
-        outpref = "train" if counted < int(target_regions * 0.8) else "test"
+foreground_spectra = np.concatenate(foreground_spectra)
 
-        region = region[0, 0, :, :]
-        region = np.uint8(region * 255)
+axarr[-1].set_xticks(ind[::16])
+axarr[-1].set_xticklabels(cosmic["base"].values[::16])#, rotation=90)
+f.tight_layout()
+f.savefig("spectra.png", dpi=200)
 
-        img = Image.fromarray(region, mode="L")
+# background_spectra = np.expand_dims(background_spectra, axis=(1, 2))
+# foreground_spectra = np.expand_dims(foreground_spectra, axis=(1, 2))
 
-        outpath = f"data/simulated/target/{outpref}/{model_i}"
-       
-        p = pathlib.Path(outpath)
-        if not p.is_dir():
-            p.mkdir(parents=True)
+print (background_spectra.shape, foreground_spectra.shape)
+# background_spectra = np.reshape(background_spectra, (N_BACKGROUND, 6, 1, 16))
+# foreground_spectra = np.reshape(foreground_spectra, (N_FOREGROUND * 2, 6, 1, 16))
 
-        img.save(f"{outpath}/{counted}.png")
+np.savez("data/background_spectra.npz", X=background_spectra, y=np.zeros(N_BACKGROUND))
+np.savez("data/target_spectra.npz", X=foreground_spectra, y=np.array(ys))
 
-        counted += 1
-
-
-# counted = 0
-# while counted < 1:
-    
-#     region = engine.sample_fake_region(
-#             [N_SMPS],
-#             param_values=[0.005],
-#         )
-#     n_batches_zero_padded = util.check_for_missing_data(region) > 0
-      
-#     if n_batches_zero_padded:
-#         continue
-
-#     if counted % 100 == 0:
-#         print(counted)
-
-#     outpref = "train" if counted < int(TOTAL_REGIONS * 0.8) else "test"
-
-#     region = region[0, 0, :, :]
-#     region = np.uint8(region * 255)
-
-#     img = Image.fromarray(region, mode="L")
-
-#     outpath = f"data/simulated/background/{outpref}/0"
-    
-#     p = pathlib.Path(outpath)
-#     if not p.is_dir():
-#         p.mkdir(parents=True)
-
-#     img.save(f"{outpath}/{counted}.png")
-
-#     counted += 1
+background_spectra = np.reshape(background_spectra, (N_BACKGROUND, 6, 1, 16))
+f, ax = plt.subplots()
+sns.heatmap(background_spectra[0, :, 0, :], ax=ax)
+f.savefig("heatmap.png")

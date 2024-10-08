@@ -30,6 +30,7 @@ def allocate_signatures(
     bg_signatures: List[str],
     fg_signatures: List[str] = [],
     fg_fraction: float = 0.1,
+    bg_fractions: List[float] = None,
 ):
     # figure out the total number of signatures we're adding
     signatures = bg_signatures + fg_signatures
@@ -73,17 +74,20 @@ sig_names = cosmic.columns[1:]
 
 N_BACKGROUND = 10_000
 BACKGROUND_SIGNATURES = ["SBS1", "SBS5", "SBS30"]
+# BACKGROUND_SIGNATURES = ["SBS5", "SBS8", "SBS9"]
 
 N_FOREGROUND = N_BACKGROUND // 2
 FOREGROUND_SIGNATURES = ["SBS18", "SBS12"]
 
-N_MUTATIONS = 100
+N_MUTATIONS_BG = 100
+N_MUTATIONS_FG = 100
 
 background_spectra = np.zeros((N_BACKGROUND, 96))
 
 ind = np.arange(96)
+cmap = np.repeat(["blue", "black", "red", "grey", "green", "pink"], 16)
 
-f, axarr = plt.subplots(3, figsize=(8, 6))
+f, axarr = plt.subplots(3, figsize=(9, 6))
 
 # create background data that is a combination of SBS1 and SBS5
 for i in tqdm.tqdm(range(N_BACKGROUND)):
@@ -93,7 +97,7 @@ for i in tqdm.tqdm(range(N_BACKGROUND)):
     # print (contributions, sum(contributions.values()))
     for signature, proportion in contributions.items():
         # total mutations to be drawn from this signature
-        total_mutations = int(N_MUTATIONS * proportion)
+        total_mutations = int(N_MUTATIONS_BG * proportion)
         # figure out which signature to sample from
         mutation_probabilities = cosmic[signature].values
         # draw a single mutation from a poisson distribution with probabilities
@@ -108,7 +112,7 @@ print (background_spectra.shape)
 # mmin, mmax = np.min(background_spectra, axis=1)[:, None], np.max(background_spectra, axis=1)[:, None]
 # background_spectra = (background_spectra - mmin) / (mmax - mmin)
 
-axarr[0].bar(ind, np.mean(background_spectra, axis=0), 1, yerr=np.std(background_spectra, axis=0))
+axarr[0].bar(ind, np.mean(background_spectra, axis=0), 1, yerr=np.std(background_spectra, axis=0), color=cmap, ec="w", lw=1)
 
 
 foreground_spectra = []
@@ -121,12 +125,12 @@ for fg_i, fg_signatures in enumerate(FOREGROUND_SIGNATURES):
             rng,
             BACKGROUND_SIGNATURES,
             [fg_signatures],
-            fg_fraction=0.05,
+            fg_fraction=0.1,
         )
         # print (contributions, sum(contributions.values()))
         for signature, proportion in contributions.items():
             # total mutations to be drawn from this signature
-            total_mutations = int(N_MUTATIONS * proportion)
+            total_mutations = int(N_MUTATIONS_FG * proportion)
             # figure out which signature to sample from
             mutation_probabilities = cosmic[signature].values
             # draw a single mutation from a poisson distribution with probabilities
@@ -141,13 +145,16 @@ for fg_i, fg_signatures in enumerate(FOREGROUND_SIGNATURES):
     mmin, mmax = np.min(fg_spectra, axis=1)[:, None], np.max(fg_spectra, axis=1)[:, None]
 
     # fg_spectra = (fg_spectra - mmin) / (mmax - mmin)
-    axarr[fg_i + 1].bar(ind, np.mean(fg_spectra, axis=0), 1, yerr=np.std(fg_spectra, axis=0))
+    axarr[fg_i + 1].bar(ind, np.mean(fg_spectra, axis=0), 1, yerr=np.std(fg_spectra, axis=0), color=cmap, ec="w", lw=1)
     foreground_spectra.append(fg_spectra)
 
 foreground_spectra = np.concatenate(foreground_spectra)
-
-axarr[-1].set_xticks(ind[::16])
-axarr[-1].set_xticklabels(cosmic["base"].values[::16])#, rotation=90)
+for i in range(3):
+    axarr[i].set_title("Background" if i == 0 else "Target w/ SBS18" if i == 1 else "Target w/ SBS12")
+    axarr[i].set_ylabel("# of mutations\n(mean +/- SD)")
+    axarr[i].set_xticks(ind[::16] + 8)
+    axarr[i].set_xticklabels(cosmic["base"].values[::16])#
+    sns.despine(ax=axarr[i])
 f.tight_layout()
 f.savefig("spectra.png", dpi=200)
 

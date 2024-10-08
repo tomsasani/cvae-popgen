@@ -21,12 +21,15 @@ from datasets import MyDataset
 from losses import PoissonMultinomial
 
 LR = 5e-4
-EPOCHS = 15
+EPOCHS = 10
 
 BATCH_SIZE = 128
 LATENT_DIM_S = 2
 LATENT_DIM_Z = 2
-HIDDEN_DIMS = [128]
+HIDDEN_DIMS = [128, 256]
+
+CMAP = np.repeat(["blue", "black", "red", "grey", "green", "pink"], 16)
+
 
 DEVICE = torch.device("cuda")
 
@@ -84,11 +87,10 @@ model = model.to(DEVICE)
 pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print (pytorch_total_params)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=LR, )
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
 
 loss_fn = losses.CVAELoss(PoissonMultinomial())
-# loss_fn = losses.CVAELoss(torch.nn.functional.binary_cross_entropy)
-# loss_fn = losses.CVAELoss(torch.nn.functional.kl_div)
 
 def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
     
@@ -228,8 +230,8 @@ def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
     ):
         i, j = ij
         x = x.cpu().numpy()[0]
-        # if (i > 0) or (j > 0):
-        #     x = np.exp(x)
+        if (i > 0) or (j > 0):
+            x = np.exp(x)
         # else:
         #     x /= np.sum(x)
 
@@ -238,7 +240,7 @@ def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
         # x /= np.sum(x)
 
         ind = np.arange(x.shape[0])
-        axarr[i, j].bar(ind, x, 1)
+        axarr[i, j].bar(ind, x, 1, color=CMAP)
         axarr[i, j].set_title(name)
     f.tight_layout()
     f.savefig(plot_name, dpi=200)
@@ -267,6 +269,7 @@ for epoch in range(EPOCHS):
          "\tAverage Test Loss: ",
         test_loss,
     )
+    scheduler.step(train_loss)
 
 res_df = pd.DataFrame(res)
 
@@ -310,17 +313,17 @@ with torch.no_grad():
         labels.append(tg_y)
 
 
-f, axarr = plt.subplots(2, figsize=(6, 8))
+f, axarr = plt.subplots(2, figsize=(6, 8))#, sharex=True, sharey=True)
 
-labels = np.concatenate(labels)# [:, glasses_attr_idx]
+labels = np.concatenate(labels)
 s_reps = np.concatenate(s_reps, axis=0)
 z_reps = np.concatenate(z_reps, axis=0)
 
 print (labels.shape, s_reps.shape, z_reps.shape)
 
 clf = LogisticRegressionCV(cv=5)
-
-for i, reps in enumerate((s_reps, z_reps)):
+titles = ["Sample embeddings in salient latent space", "Sample embeddings in irrelevant latent space"]
+for i, (reps, title) in enumerate(zip((s_reps, z_reps), titles)):
 
     clf.fit(reps, labels)
     preds = clf.predict(reps)
@@ -329,11 +332,14 @@ for i, reps in enumerate((s_reps, z_reps)):
         pca = PCA(n_components=2)
         reps = pca.fit_transform(reps)
     axarr[i].scatter(reps[:, 0], reps[:, 1], c=labels, alpha=0.5)
-    axarr[i].set_title(round(silhouette_score(reps, labels), 3))
+    silhouette = str(round(silhouette_score(reps, labels), 3))
+    title += f"\n(silhouette score = {silhouette})"
+    axarr[i].set_title(title)
 
+f.tight_layout()
 f.savefig("cvae.coords.png", dpi=200)
 
-def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=8):
+def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=4):
 
     f, axarr = plt.subplots(n, n, figsize=(8, 8))
     for i, y in enumerate(np.linspace(*r1, n)):
@@ -345,13 +351,15 @@ def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=8):
             x_hat = model.decoder(torch.cat((z, z_), dim=1))
             x_hat = x_hat.to('cpu').detach().numpy()[0]
             ind = np.arange(x_hat.shape[0])
+            x_hat = np.exp(x_hat)
 
-            axarr[i, j].bar(ind, x_hat, 1)
+            axarr[i, j].bar(ind, x_hat, 1, color=CMAP)
             axarr[i, j].set_xticks([])
             axarr[i, j].set_yticks([])
     f.tight_layout()
-    plt.subplots_adjust(wspace=0, hspace=0)
-    f.savefig("cvae.recons.png")
+    f.suptitle("Reconstructed mutation spectra from latent space")
+    #plt.subplots_adjust(wspace=0, hspace=0)
+    f.savefig("cvae.recons.png", dpi=100)
 
 if LATENT_DIM_S == 2:
     plot_reconstructed(model)

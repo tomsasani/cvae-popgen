@@ -50,14 +50,14 @@ def cpca(tg: np.ndarray, bg: np.ndarray, alpha: float=1, rank: int = 2):
 
     return vals[::-1], vectors[::-1]
 
-clf = NMF(n_components=4)
+clf = NMF(n_components=5)
 W = clf.fit_transform(log2_transform(X_tg))
 H = clf.components_
 print (W.shape, H.shape)
 
 H /= np.sum(H, axis=1)[:, None]
 
-f, axarr = plt.subplots(4)
+f, axarr = plt.subplots(5)
 ind = np.arange(96)
 for i in range(H.shape[0]):
     axarr[i].bar(ind, H[i], 1)

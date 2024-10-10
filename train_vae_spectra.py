@@ -94,15 +94,12 @@ def plot_example(model, dataloader, plot_name: str):
             x = x.cpu().numpy()[0]
             x_hat = x_hat.cpu().numpy()[0]
 
-            x_hat = np.exp(x_hat)
-
             ind = np.arange(x.shape[0])
 
             axarr[i, 0].bar(ind, x, 1, color=CMAP)
             axarr[i, 1].bar(ind, x_hat, 1, color=CMAP)
 
     f.tight_layout()
-    # plt.subplots_adjust(wspace=0, hspace=0)
     f.savefig(plot_name, dpi=200)
     plt.close()
 

@@ -23,7 +23,7 @@ class PoissonMultinomial(nn.Module):
         y_true = y_true + self.eps
         y_pred = y_pred + self.eps
 
-        multinomial_term = F.poisson_nll_loss(y_pred, y_true, log_input=True, reduction=reduction)
+        multinomial_term = F.poisson_nll_loss(y_pred, y_true, log_input=False, reduction=reduction)
 
         loss_raw = multinomial_term
         
@@ -76,7 +76,6 @@ class VAELoss(nn.Module):
             orig,
             reduction="none",
         )
-        # recons_loss = F.cosine_embedding_loss(recon, orig, torch.tensor([1]).to(DEVICE), reduction="none")
         # compute average of the per-pixel total loss for each image
         recons_loss = torch.mean(torch.sum(recons_loss, dim=1), dim=0)
 
@@ -109,31 +108,30 @@ class CVAELoss(nn.Module):
         cvae_dict,
     ):
 
-        # N, C, H, W = tg_inputs.shape
-
+        # inputs have been log1p normalized, so
+        # we'll undo that to compare to output counts
         tg_outputs = cvae_dict["tg_out"]
+
         MSE_tg = self.loss_fn(
             tg_outputs,
             tg_inputs,
             reduction="none",
         )
 
-        # MSE_tg = torch.sum(MSE_tg)
         # compute average per-image loss across the batch
         MSE_tg = torch.mean(torch.sum(MSE_tg, dim=1), dim=0)
 
         bg_outputs = cvae_dict["bg_out"]
+
         MSE_bg = self.loss_fn(
             bg_outputs,
             bg_inputs,
             reduction="none",
         )
 
-        # MSE_bg = torch.sum(MSE_bg)
         # compute average per-image loss across the batch
         MSE_bg = torch.mean(torch.sum(MSE_bg, dim=1), dim=0)
 
-        # print (MSE_tg.item(), MSE_bg.item())
         # compute KL loss per image
         tg_s_log_var, tg_s_mu = cvae_dict["tg_s_log_var"], cvae_dict["tg_s_mu"]
         tg_z_log_var, tg_z_mu = cvae_dict["tg_z_log_var"], cvae_dict["tg_z_mu"]

@@ -174,8 +174,9 @@ def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
     ):
         i, j = ij
         x = x.cpu().numpy()[0]
-        if (i > 0) or (j > 0):
-            x = np.exp(x)
+        
+        # if (i > 0) or (j > 0):
+        #     x = np.exp(x)
         # else:
 
         # undo log1p
@@ -199,7 +200,12 @@ def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=4):
             z = torch.Tensor([[x, y]]).to(DEVICE)
             # sample 0s for the irrelevant vector
             z_ = torch.Tensor([[0] * LATENT_DIM_Z]).to(DEVICE)
-            x_hat = model.decoder(torch.cat((z, z_), dim=1))
+
+            # fake log libsize
+            x_hat = model.decoder(
+                torch.cat((z, z_), dim=1),
+                torch.log1p(torch.Tensor([1_000]).to(DEVICE)),
+            )
             x_hat = x_hat.to("cpu").detach().numpy()[0]
             ind = np.arange(x_hat.shape[0])
             # x_hat = np.exp(x_hat)
@@ -372,14 +378,11 @@ def main(args):
             s_reps.append(salient)
             z_reps.append(irrelevant)
             labels.append(tg_y)
-    print (len(s_reps), len(z_reps), len(labels))
+
     labels = np.concatenate(labels)
     s_reps = np.concatenate(s_reps, axis=0)
     z_reps = np.concatenate(z_reps, axis=0)
 
-    print (labels.shape)
-    print (s_reps.shape)
-    print (z_reps.shape)
 
     # clf = LogisticRegressionCV(cv=5)
     titles = [

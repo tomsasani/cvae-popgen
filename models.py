@@ -72,14 +72,16 @@ class DecoderFC(nn.Module):
         self.fc = nn.Sequential(*layers)
 
         self.fc_out = nn.Linear(hidden_dims[-1], in_W, bias=bias)
+        # self.scaling_factor = nn.Linear(hidden_dims[-1], 1)
 
         self.softmax = nn.Softmax(1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, libsize: torch.Tensor):
         x = self.fc(x)
         x = self.fc_out(x)
-        # x = self.softmax(x)
-        # x = torch.poisson(x, )
+        x = self.softmax(x)
+        # multiply by libsize to get poisson lambda
+        x = x * torch.unsqueeze(libsize, dim=1)
         return x
 
 
@@ -91,6 +93,7 @@ class Discriminator(nn.Module):
                 nn.Linear(latent_dim_s + latent_dim_z, 1),
                 nn.Sigmoid(),
             )
+
     def forward(self, tg_s, tg_z):
 
         # get shape of z, where N is batch
@@ -102,7 +105,7 @@ class Discriminator(nn.Module):
             N -= 1
             tg_z = tg_z[:N]
             tg_s = tg_s[:N]
-        
+
         half_N = int(N / 2)
 
         # first half of batch of irrelevant latent space
@@ -110,17 +113,23 @@ class Discriminator(nn.Module):
         z2 = tg_z[half_N:, :]
         s1 = tg_s[:half_N, :]
         s2 = tg_s[half_N:, :]
-        
+
         q = torch.cat(
-            [torch.cat([s1, z1], dim=1),
-            torch.cat([s2, z2], dim=1)],
-            dim=0)
-        
+            [
+                torch.cat([s1, z1], dim=1),
+                torch.cat([s2, z2], dim=1),
+            ],
+            dim=0,
+        )
+
         q_bar = torch.cat(
-            [torch.cat([s1, z2], dim=1),
-            torch.cat([s2, z1], dim=1)],
-            dim=0)
-        
+            [
+                torch.cat([s1, z2], dim=1),
+                torch.cat([s2, z1], dim=1),
+            ],
+            dim=0,
+        )
+
         q_bar_score = self.discriminator(q_bar)
         q_score = self.discriminator(q)
 
@@ -157,9 +166,13 @@ class VAE(nn.Module):
         :param input: (Tensor) Input tensor to encoder [N x C x H x W]
         :return: (Tensor) List of latent codes
         """
+        # figure out the library size (number of mutations) in each
+        # training example
+        log_libsize = torch.sum(x, dim=1)
+
         mu, log_var = self.encoder(x)
         z = self.reparameterize(mu, log_var)
-        decoded = self.decoder(z)
+        decoded = self.decoder(z, log_libsize)
         return [decoded, mu, log_var, z]
 
 
@@ -196,6 +209,10 @@ class CVAE(nn.Module):
 
     def forward(self, tg_inputs, bg_inputs) -> torch.Tensor:
 
+        tg_log_libsize = torch.sum(tg_inputs, dim=1)
+        bg_log_libsize = torch.sum(bg_inputs, dim=1)
+
+
         # step 1: pass target features through irrelevant
         # and salient encoders.
 
@@ -219,12 +236,12 @@ class CVAE(nn.Module):
         # decode the target outputs using both the salient and
         # irrelevant features
 
-        tg_outputs = self.decoder(torch.cat([tg_s, tg_z], dim=1))
+        tg_outputs = self.decoder(torch.cat([tg_s, tg_z], dim=1), tg_log_libsize)
         # we decode the background outputs using only the irrelevant
         # features
-        bg_outputs = self.decoder(torch.cat([torch.zeros_like(bg_s), bg_z], dim=1))
+        bg_outputs = self.decoder(torch.cat([torch.zeros_like(bg_s), bg_z], dim=1), bg_log_libsize)
         # we decode the "foreground" using just the salient features
-        fg_outputs = self.decoder(torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1))
+        fg_outputs = self.decoder(torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1), tg_log_libsize)
 
         # step 4: (optional) discriminate
         q_score, q_bar_score = self.discriminator(tg_s, tg_z)

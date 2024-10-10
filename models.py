@@ -5,205 +5,6 @@ import torchvision
 import torchvision.transforms.functional as F
 
 
-class FinetuneResnet(nn.Module):
-
-    def __init__(
-        self,
-        pretrained_model,
-        representation_dims: int = 512,
-        latent_dims: int = 3,
-        apply_norm: bool = False,
-    ):
-        super(FinetuneResnet, self).__init__()
-
-        self.representation = pretrained_model
-        self.latent = nn.Sequential(
-                nn.Linear(representation_dims, representation_dims),
-                nn.ReLU(),
-                nn.Dropout(0.2),
-                nn.Linear(representation_dims, latent_dims),
-            )
-        self.relu = nn.ReLU()
-
-        self.apply_norm = apply_norm
-
-    def forward(self, x):
-        # produce output of final conv layer/avg pool
-        representation = self.representation(x)
-
-        # relu non-linearity in encoder
-        representation = self.relu(representation)
-        if self.apply_norm:
-            representation = torch.nn.functional.normalize(representation, p=2, dim=1)
-        latent = self.latent(representation)        
-        latent = self.relu(latent)
-        if self.apply_norm:
-            latent = torch.nn.functional.normalize(latent, p=2, dim=1)
-        return representation, latent
-
-class ConvBlock2D(nn.Module):
-
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int]],
-        stride: Union[int, Tuple[int]],
-        padding: Union[int, Tuple[int]],
-        batch_norm: bool = True,
-        activation: bool = True,
-        bias: bool = False,
-    ):
-        super(ConvBlock2D, self).__init__()
-
-        conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=bias,
-        )
-
-        relu = nn.LeakyReLU(0.2)
-        norm = nn.BatchNorm2d(out_channels)
-        layers = [conv]
-        if activation:
-            layers.append(relu)
-        if batch_norm:
-            layers.append(norm)
-        self.block = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class ConvTransposeBlock2D(nn.Module):
-
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int]],
-        stride: Union[int, Tuple[int]],
-        padding: Union[int, Tuple[int]],
-        output_padding: Union[int, Tuple[int]],
-        batch_norm: bool = True,
-        activation: bool = True,
-        bias: bool = False,
-    ):
-        super(ConvTransposeBlock2D, self).__init__()
-
-        conv = nn.ConvTranspose2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            output_padding=output_padding,
-            bias=bias,
-        )
-
-        relu = nn.LeakyReLU(0.2)
-        norm = nn.BatchNorm2d(out_channels)
-        layers = [conv]
-        if activation:
-            layers.append(relu)
-        if batch_norm:
-            layers.append(norm)
-        self.block = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.block(x)
-
-
-class CNN(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        latent_dim: int,
-        kernel_size: int = 3,
-        stride: int = 2,
-        padding: int = 1,
-        hidden_dims: List[int] = None,
-        intermediate_dim: int = 128,
-        in_HW: Tuple[int] = (32, 32),
-    ) -> None:
-        super(CNN, self).__init__()
-
-        self.latent_dim = latent_dim
-
-        if hidden_dims is None:
-            hidden_dims = [16, 32, 64, 128, 256]
-
-        # figure out final size of image after convs
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        encoder_blocks = []
-        for h_dim in hidden_dims:
-            # initialize convolutional block
-            block = ConvBlock2D(
-                    in_channels=in_channels,
-                    out_channels=h_dim,
-                    kernel_size=kernel_size,
-                    stride=stride,
-                    padding=padding,
-                    activation=True,
-                    batch_norm=True,
-                    bias=True,
-                )
-
-            encoder_blocks.append(block)
-
-            in_channels = h_dim
-
-        self.encoder_conv = nn.Sequential(*encoder_blocks)
-
-        self.fc_intermediate = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            intermediate_dim,
-        )
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)
-
-        self.fc1 = nn.Linear(
-            intermediate_dim,
-            intermediate_dim,
-        )
-        self.fc2 = nn.Linear(
-            intermediate_dim,
-            latent_dim,
-        )
-
-    def forward(self, x):
-        x = self.encoder_conv(x)
-
-        # flatten, but ignore batch
-        x = torch.flatten(x, start_dim=1)
-
-        x = self.fc_intermediate(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-
-        return x
-
-
 class EncoderFC(nn.Module):
     def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
         super(EncoderFC, self).__init__()
@@ -216,16 +17,16 @@ class EncoderFC(nn.Module):
 
         for hi in range(1, len(hidden_dims)):
             layers.extend(
-                [nn.Linear(hidden_dims[hi - 1], hidden_dims[hi]),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(
-                    hidden_dims[hi],
-                ),]
+                [
+                    nn.Linear(hidden_dims[hi - 1], hidden_dims[hi]),
+                    nn.LeakyReLU(0.2),
+                    nn.BatchNorm1d(
+                        hidden_dims[hi],
+                    ),
+                ]
             )
 
-
         self.fc = nn.Sequential(*layers)
-
 
         self.fc_mu = nn.Linear(
             hidden_dims[-1],
@@ -236,10 +37,10 @@ class EncoderFC(nn.Module):
             latent_dim,
         )
 
-
     def forward(self, x):
+
         x = self.fc(x)
-    
+
         mu, log_var = self.fc_mu(x), self.fc_var(x)
 
         return [mu, log_var]
@@ -271,221 +72,14 @@ class DecoderFC(nn.Module):
         self.fc = nn.Sequential(*layers)
 
         self.fc_out = nn.Linear(hidden_dims[-1], in_W, bias=bias)
-        
-        self.softmax = nn.LogSoftmax(1)
-        self.softplus = nn.Softplus()
+
+        self.softmax = nn.Softmax(1)
 
     def forward(self, x):
         x = self.fc(x)
         x = self.fc_out(x)
-        # x = self.softplus(x)
-        return x
-
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        latent_dim: int,
-        kernel_size: Union[int, Tuple[int]] = 5,
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
-        hidden_dims: List[int] = None,
-        intermediate_dim: int = 128,
-        in_HW: Tuple[int] = (32, 32),
-    ) -> None:
-        super(Encoder, self).__init__()
-
-        self.latent_dim = latent_dim
-        bias = False
-
-        if hidden_dims is None:
-            hidden_dims = [16, 32, 64, 128, 256]
-
-        # figure out final size of image after convs
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        encoder_blocks = []
-        for h_dim in hidden_dims:
-            # initialize convolutional block
-            block = ConvBlock2D(
-                in_channels=in_channels,
-                out_channels=h_dim,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                batch_norm=True,
-                activation=True,
-                bias=bias,
-            )
-            encoder_blocks.append(block)
-
-            in_channels = h_dim
-
-        self.encoder_conv = nn.Sequential(*encoder_blocks)
-
-        self.fc_intermediate = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            intermediate_dim,
-            bias=bias,
-        )
-
-        self.fc_mu = nn.Linear(
-            intermediate_dim,
-            latent_dim,
-            bias=bias,
-        )
-        self.fc_var = nn.Linear(
-            intermediate_dim,
-            latent_dim,
-            bias=bias,
-        )
-
-        self.relu = nn.LeakyReLU(0.2)
-
-
-    def forward(self, x):
-        # print ("BEFORE ENCODING", x.min(), x.max())
-        x = self.encoder_conv(x)
-        # print ("BEFORE FLATTENING", x.min(), x.max())
-        # flatten, but ignore batch
-        x = torch.flatten(x, start_dim=1)
-        # print ("AFTER FLATTENING", x.min(), x.max())
-
-        x = self.fc_intermediate(x)
-        x = self.relu(x)
-
-        # print ("AFTER INTERMEIDATE", x.min(), x.max())
-
-        # split the result into mu and var components
-        # of the latent Gaussian distribution
-        mu = self.fc_mu(x)
-        log_var = self.fc_var(x)
-
-        return [mu, log_var]
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        out_channels: int,
-        latent_dim: int,
-        kernel_size: Union[int, Tuple[int]] = (5, 5),
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
-        output_padding: Union[int, Tuple[int]] = 1,
-        hidden_dims: List[int] = None,
-        intermediate_dim: int = 128,
-        in_HW: Tuple[int] = (32, 32),
-    ) -> None:
-        super(Decoder, self).__init__()
-
-        bias = False
-
-        if hidden_dims is None:
-            hidden_dims = [16, 32, 64, 128, 256]
-
-        # figure out final dimension to which we 
-        # need to reshape our filters before decoding
-        self.final_dim = hidden_dims[-1]
-
-        # figure out final size of image after convs
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        self.out_H = out_H
-        self.out_W = out_W
-
-        self.decoder_input = nn.Linear(
-            latent_dim,
-            intermediate_dim,
-            bias=bias,
-        )
-
-        self.decoder_upsize = nn.Linear(
-            intermediate_dim,
-            hidden_dims[-1] * out_H * out_W,
-            bias=bias,
-        )
-
-        decoder_blocks = []
-
-        # loop over hidden dims in reverse
-        hidden_dims.reverse()
-
-        for i in range(len(hidden_dims) - 1):
-            block = ConvTransposeBlock2D(
-                in_channels=hidden_dims[i],
-                out_channels=hidden_dims[i + 1],
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-                batch_norm=True,
-                activation=True,
-                bias=bias,
-            )
-            decoder_blocks.append(block)
-
-        self.decoder_conv = nn.Sequential(*decoder_blocks)
-        self.relu = nn.LeakyReLU(0.2)
-
-        # NOTE: no batch norm and no ReLu in final block
-        final_block = [
-            ConvTransposeBlock2D(
-                in_channels=hidden_dims[-1],
-                out_channels=hidden_dims[-1],
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-                batch_norm=True,
-                activation=True,
-                bias=bias,
-            ),
-            ConvBlock2D(
-                in_channels=hidden_dims[-1],
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=(1, 1),
-                padding=padding,
-                batch_norm=False,
-                activation=False,
-                bias=bias,
-            ),
-            nn.Sigmoid(),
-        ]
-        self.final_block = nn.Sequential(*final_block)
-
-    def forward(self, z: torch.Tensor):
-
-        # fc from latent to intermediate
-        x = self.decoder_input(z)
-        x = self.relu(x)
-        x = self.decoder_upsize(x)
-        x = self.relu(x)
-        # reshape
-
-        x = x.view((-1, self.final_dim, self.out_H, self.out_W))
-        x = self.decoder_conv(x)
-
-        x = self.final_block(x)
+        # x = self.softmax(x)
+        # x = torch.poisson(x, )
         return x
 
 
@@ -632,10 +226,8 @@ class CVAE(nn.Module):
         # we decode the "foreground" using just the salient features
         fg_outputs = self.decoder(torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1))
 
-
         # step 4: (optional) discriminate
         q_score, q_bar_score = self.discriminator(tg_s, tg_z)
-
 
         out_dict = {
             "tg_out": tg_outputs,

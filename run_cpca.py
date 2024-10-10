@@ -7,6 +7,16 @@ from sklearn.metrics import silhouette_score
 import scipy
 import matplotlib.pyplot as plt
 import seaborn as sns
+import argparse
+from make_training_data_cancer import poisson_resample
+import tqdm
+import pandas as pd
+
+import warnings
+warnings.filterwarnings("ignore")
+
+CMAP = np.repeat(["blue", "black", "red", "grey", "green", "pink"], 16)
+
 
 def log2_transform(X: np.ndarray):
     # assume shape is N, K
@@ -23,16 +33,13 @@ def log2_transform(X: np.ndarray):
 
     return X_new
 
-bg = np.load("data/background_spectra.npz")
-tg = np.load("data/target_spectra.npz")
 
-X_bg, y_bg = bg["X"], bg["y"]
-X_tg, y_tg = tg["X"], tg["y"]
-
-X_bg_train, X_bg_test, y_bg_train, y_bg_test = train_test_split(X_bg, y_bg, test_size=0.2)
-X_tg_train, X_tg_test, y_tg_train, y_tg_test = train_test_split(X_tg, y_tg, test_size=0.2)
-
-def cpca(tg: np.ndarray, bg: np.ndarray, alpha: float=1, rank: int = 2):
+def cpca(
+    tg: np.ndarray,
+    bg: np.ndarray,
+    alpha: float = 1,
+    rank: int = 2,
+):
 
     # construct feature covariance
     tg_cov = np.dot(tg.T, tg)
@@ -50,44 +57,92 @@ def cpca(tg: np.ndarray, bg: np.ndarray, alpha: float=1, rank: int = 2):
 
     return vals[::-1], vectors[::-1]
 
-clf = NMF(n_components=5)
-W = clf.fit_transform(log2_transform(X_tg))
-H = clf.components_
-print (W.shape, H.shape)
 
-H /= np.sum(H, axis=1)[:, None]
+def main(args):
 
-f, axarr = plt.subplots(5)
-ind = np.arange(96)
-for i in range(H.shape[0]):
-    axarr[i].bar(ind, H[i], 1)
-f.savefig("nmf.png")
+    rng = np.random.default_rng(42)
 
-g = sns.clustermap(data=W)
-g.fig.suptitle(round(silhouette_score(W, y_tg), 3))
-g.savefig("nmf.cluster.png")
+    bg = np.load(args.bg)
+    tg = np.load(args.tg)
+
+    X_bg, y_bg = bg["X"], bg["y"]
+    X_tg, y_tg = tg["X"], tg["y"]
+
+    if args.resample:
+
+        # get minimum count across both
+        min_count = min(
+            [
+                np.min(np.sum(X_bg, axis=1)),
+                np.min(np.sum(X_tg, axis=1)),
+            ]
+        )
+
+        X_bg = poisson_resample(rng, X_bg, min_count)
+        X_tg = poisson_resample(rng, X_tg, min_count)
+
+    (
+        X_bg_train,
+        X_bg_test,
+        y_bg_train,
+        y_bg_test,
+    ) = train_test_split(X_bg, y_bg, test_size=0.2)
+
+    (
+        X_tg_train,
+        X_tg_test,
+        y_tg_train,
+        y_tg_test,
+    ) = train_test_split(X_tg, y_tg, test_size=0.2)
 
 
-X_tg_train = X_tg_train / np.sum(X_tg_train, axis=1)[:, None]
-X_tg_test = X_tg_test / np.sum(X_tg_test, axis=1)[:, None]
+    # fit NMF
 
-clf = StandardScaler()
-X_tg_train = clf.fit_transform(X_tg_train)
-X_tg_test = clf.fit_transform(X_tg_test)
+    errs = []
+    for n in tqdm.tqdm(range(2, 25)):
+        clf = NMF(n_components=n, max_iter=200)
+        W = clf.fit_transform(log2_transform(X_tg))
+        H = clf.components_
+        errs.append((n, clf.reconstruction_err_))
+
+    best_n = sorted(errs, key=lambda k: k[1])[0][0]
 
 
-clf = PCA(n_components=2)
-clf.fit(X_tg_train)
-X_new = clf.transform(X_tg_test)
-f, ax = plt.subplots()
-ax.scatter(X_new[:, 0], X_new[:, 1], c=y_tg_test)
-f.savefig("pca.png")
+    clf = NMF(n_components=best_n)
+    W = clf.fit_transform(X_tg)
+    H = clf.components_
+    H /= np.sum(H, axis=1)[:, None]
 
-_, cpcs = cpca(X_tg, X_bg, alpha=1, rank=2)
-# project onto cpcs
-X_new = np.dot(X_tg, cpcs)
-print (X_new.shape)
-f, ax = plt.subplots()
-ax.scatter(X_new[:, 0], X_new[:, 1], c=y_tg)
-f.savefig("cpca.png")
+    silhouette = round(silhouette_score(W, y_tg), 3)
+    print (silhouette)
 
+    res_df = pd.DataFrame({"salient_silhouette": [silhouette]})
+
+    res_df.to_csv(args.out, index=False)
+
+    if args.plot:
+        # cluster
+        g = sns.clustermap(data=W, cmap="bone")
+        g.savefig('o.png', dpi=200)
+        ind = np.arange(96)
+        f, axarr = plt.subplots(best_n, figsize=(6, best_n * 2), sharex=True)
+        for i in range(best_n):
+            axarr[i].bar(ind, H[i], 1, color=CMAP)
+            axarr[i].set_ylabel("Fraction")
+            if i == best_n - 1:
+                axarr[i].set_xlabel("Mutation type")
+            axarr[i].set_title(f"Inferred signature {i + 1}")
+        f.tight_layout()
+        f.savefig("signatures.png", dpi=200)
+
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--bg")
+    p.add_argument("--tg")
+    p.add_argument("--out")
+    p.add_argument("-resample", action="store_true")
+    p.add_argument("-plot", action="store_true")
+    args = p.parse_args()
+    main(args)

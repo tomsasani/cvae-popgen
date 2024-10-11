@@ -3,7 +3,10 @@ from torch import nn
 from typing import List, Tuple, Union
 import torchvision
 import torchvision.transforms.functional as F
+from torch.distributions import gamma, log_normal, poisson, negative_binomial
 
+
+DEVICE = torch.device("mps")
 
 class EncoderFC(nn.Module):
     def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
@@ -72,17 +75,75 @@ class DecoderFC(nn.Module):
         self.fc = nn.Sequential(*layers)
 
         self.fc_out = nn.Linear(hidden_dims[-1], in_W, bias=bias)
-        # self.scaling_factor = nn.Linear(hidden_dims[-1], 1)
+        self.dispersion = nn.Linear(hidden_dims[-1], in_W, bias=bias)
 
         self.softmax = nn.Softmax(1)
+        self.softplus = nn.Softplus()
 
-    def forward(self, x: torch.Tensor, libsize: torch.Tensor):
-        x = self.fc(x)
-        x = self.fc_out(x)
-        x = self.softmax(x)
-        # multiply by libsize to get poisson lambda
-        x = x * torch.unsqueeze(libsize, dim=1)
-        return x
+    def forward(
+        self,
+        x: torch.Tensor,
+        lib_mu: torch.Tensor,
+        lib_var: torch.Tensor,
+    ):
+        # https://academic.oup.com/bioinformatics/article/36/11/3418/5807606?login=false
+        decoded = self.fc(x)
+        scale = self.fc_out(decoded)
+
+        # normalized contribution from each mutation type
+        scale = self.softmax(scale)
+
+        # disp = self.dispersion(decoded)
+        # disp = self.softplus(disp)
+
+        # take a draw from the distribution of total
+        # mutation counts per sample
+        _s = log_normal.LogNormal(lib_mu, lib_var)
+        s = _s.sample().to(DEVICE)
+
+        # _g = gamma.Gamma(disp, scale)
+        # g = _g.sample().to(DEVICE)
+
+        # _p = poisson.Poisson(scale * s)
+        # p = _p.sample()
+        # print (p.shape)
+
+        # p = s * scale
+        # print (scale[0])
+        # return the poisson rate parameter
+        return scale * s
+
+
+class DecoderLinear(nn.Module):
+    def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
+        super(DecoderFC, self).__init__()
+
+        bias = False
+
+        self.fc = nn.Sequential(
+            nn.Linear(latent_dim, in_W, bias=bias),
+            nn.ReLU(),
+        )
+
+        self.softmax = nn.Softmax(1)
+        self.softplus = nn.Softplus()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        lib_mu: torch.Tensor,
+        lib_var: torch.Tensor,
+    ):
+        # https://academic.oup.com/bioinformatics/article/36/11/3418/5807606?login=false
+        decoded = self.fc(x)
+        scale = self.softmax(decoded)
+
+        _s = log_normal.LogNormal(lib_mu, lib_var)
+        s = _s.sample().to(DEVICE)
+
+        p = s * scale
+
+        return p
 
 
 class Discriminator(nn.Module):
@@ -142,11 +203,14 @@ class VAE(nn.Module):
         self,
         encoder,
         decoder,
+        lib_mu, lib_var,
     ) -> None:
         super(VAE, self).__init__()
 
         self.encoder = encoder
         self.decoder = decoder
+        self.lib_mu = lib_mu
+        self.lib_var = lib_var
 
     def reparameterize(
         self,
@@ -166,13 +230,9 @@ class VAE(nn.Module):
         :param input: (Tensor) Input tensor to encoder [N x C x H x W]
         :return: (Tensor) List of latent codes
         """
-        # figure out the library size (number of mutations) in each
-        # training example
-        log_libsize = torch.sum(x, dim=1)
-
         mu, log_var = self.encoder(x)
         z = self.reparameterize(mu, log_var)
-        decoded = self.decoder(z, log_libsize)
+        decoded = self.decoder(z, self.lib_mu, self.lib_var)
         return [decoded, mu, log_var, z]
 
 
@@ -185,6 +245,7 @@ class CVAE(nn.Module):
         z_encoder,
         decoder,
         discriminator,
+        lib_mu, lib_var,
     ):
         super(CVAE, self).__init__()
 
@@ -195,6 +256,8 @@ class CVAE(nn.Module):
         self.decoder = decoder
         # instantitate the disrimintator
         self.discriminator = discriminator
+        self.lib_mu = lib_mu
+        self.lib_var = lib_var
 
     def reparameterize(
         self,
@@ -208,10 +271,6 @@ class CVAE(nn.Module):
         return eps * std + mu
 
     def forward(self, tg_inputs, bg_inputs) -> torch.Tensor:
-
-        tg_log_libsize = torch.sum(tg_inputs, dim=1)
-        bg_log_libsize = torch.sum(bg_inputs, dim=1)
-
 
         # step 1: pass target features through irrelevant
         # and salient encoders.
@@ -236,12 +295,24 @@ class CVAE(nn.Module):
         # decode the target outputs using both the salient and
         # irrelevant features
 
-        tg_outputs = self.decoder(torch.cat([tg_s, tg_z], dim=1), tg_log_libsize)
+        tg_outputs = self.decoder(
+            torch.cat([tg_s, tg_z], dim=1),
+            self.lib_mu,
+            self.lib_var,
+        )
         # we decode the background outputs using only the irrelevant
         # features
-        bg_outputs = self.decoder(torch.cat([torch.zeros_like(bg_s), bg_z], dim=1), bg_log_libsize)
+        bg_outputs = self.decoder(
+            torch.cat([torch.zeros_like(bg_s), bg_z], dim=1),
+            self.lib_mu,
+            self.lib_var,
+        )
         # we decode the "foreground" using just the salient features
-        fg_outputs = self.decoder(torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1), tg_log_libsize)
+        fg_outputs = self.decoder(
+            torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1),
+            self.lib_mu,
+            self.lib_var,
+        )
 
         # step 4: (optional) discriminate
         q_score, q_bar_score = self.discriminator(tg_s, tg_z)

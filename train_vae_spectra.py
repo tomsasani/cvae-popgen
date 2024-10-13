@@ -39,8 +39,8 @@ def train_loop(model, dataloader, loss_fn, optimizer):
         x = x.to(DEVICE)
         optimizer.zero_grad()
 
-        x_hat, mean, log_var, z = model(x)
-        loss = loss_fn(x, x_hat, mean, log_var)
+        x_hat, disp, mean, log_var, z = model(x)
+        loss = loss_fn(x, x_hat, disp, mean, log_var)
         total_loss += loss.item()
 
         loss.backward()
@@ -66,10 +66,9 @@ def test_loop(model, dataloader, loss_fn):
 
             x = x.to(DEVICE)
 
-            x_hat, mean, log_var, z = model(x)
-            # x = x.reshape(x.shape[0], 28 * 28)
+            x_hat, disp, mean, log_var, z = model(x)
+            loss = loss_fn(x, x_hat, disp, mean, log_var)
 
-            loss = loss_fn(x, x_hat, mean, log_var)
             total_loss += loss.item()
 
     return total_loss / (n_batches * batch_size)
@@ -89,10 +88,11 @@ def plot_example(model, dataloader, plot_name: str):
             xs, ys = next(dataloader_iter)
             # add batch dimension to single example
             x = torch.unsqueeze(xs[0].to(DEVICE), dim=0)
-            x_hat, mu, log_var, z = model(x)
+            x_hat, disp, mean, log_var, z = model(x)
 
             x = x.cpu().numpy()[0]
             x_hat = x_hat.cpu().numpy()[0]
+            x_hat = np.random.poisson(x_hat)
 
             ind = np.arange(x.shape[0])
 
@@ -111,7 +111,7 @@ def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=4):
             # sample a salient vector
             z = torch.Tensor([[x, y]]).to(DEVICE)
             # sample 0s for the irrelevant vector
-            x_hat = model.decoder(z)
+            x_hat, _ = model.decoder(z)
             x_hat = x_hat.to("cpu").detach().numpy()[0]
             ind = np.arange(x_hat.shape[0])
 
@@ -159,8 +159,24 @@ def main(args):
         X_bg = poisson_resample(rng, X_bg, min_count)
         X_tg = poisson_resample(rng, X_tg, min_count)
 
-        X_bg, y_bg = torch.from_numpy(X_bg), torch.from_numpy(y_bg)
-        X_tg, y_tg = torch.from_numpy(X_tg), torch.from_numpy(y_tg)
+    # get empirical mean and variance of log library size
+    bg_sums = np.sum(X_bg, axis=1)
+    tg_sums = np.sum(X_tg, axis=1)
+    log_size = torch.Tensor(
+        [
+            np.mean(
+                np.concatenate(
+                    [
+                        bg_sums,
+                        tg_sums,
+                    ]
+                )
+            )
+        ]
+    ).to(DEVICE)
+
+    X_bg, y_bg = torch.from_numpy(X_bg), torch.from_numpy(y_bg)
+    X_tg, y_tg = torch.from_numpy(X_tg), torch.from_numpy(y_tg)
 
     tg = MyDataset(X_tg, y_tg, transform=transforms.ToTensor())
 
@@ -193,6 +209,7 @@ def main(args):
     model = models.VAE(
         encoder=encoder,
         decoder=decoder,
+        lib_size=log_size,
     )
     model = model.to(DEVICE)
 
@@ -205,6 +222,7 @@ def main(args):
     )
 
     loss_fn = losses.VAELoss(losses.PoissonMultinomial())
+    loss_fn = losses.VAELoss(losses.NB())
 
     print("Start training VAE...")
 
@@ -236,7 +254,9 @@ def main(args):
         )
 
     res_df = pd.DataFrame(res)
-
+    f, ax = plt.subplots()
+    sns.lineplot(x="epoch", y="loss_val", hue="loss_kind", ax=ax, data=res_df)
+    f.savefig("vae.loss.png", dpi=200)
     print("Finish!!")
 
     model.eval()
@@ -249,7 +269,7 @@ def main(args):
         for batch_idx, (x, y) in enumerate(tqdm.tqdm(tg_test)):
             x = x.to(DEVICE)
 
-            x_hat, mu, log_var, z = model(x)
+            x_hat, disp, mu, log_var, z = model(x)
             z = z.cpu().numpy()
             reps.append(z)
             labels.append(y)

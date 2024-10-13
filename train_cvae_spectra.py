@@ -16,7 +16,14 @@ from make_training_data_cancer import poisson_resample
 import argparse
 import seaborn as sns
 
-def train_loop(model, tg_dataloader, bg_dataloader, loss_fn, optimizer):
+
+def train_loop(
+    model,
+    tg_dataloader,
+    bg_dataloader,
+    loss_fn,
+    optimizer,
+):
 
     model.train()
 
@@ -174,14 +181,9 @@ def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
     ):
         i, j = ij
         x = x.cpu().numpy()[0]
-        
-        # if (i > 0) or (j > 0):
-        #     x = np.exp(x)
-        # else:
 
-        # undo log1p
-        # x = np.exp(x) - 1
-        # x /= np.sum(x)
+        if (i > 0) or (j > 0):
+            x = np.random.poisson(x)
 
         ind = np.arange(x.shape[0])
         axarr[i, j].bar(ind, x, 1, color=CMAP)
@@ -191,7 +193,7 @@ def plot_example(model, tg_dataloader, bg_dataloader, plot_name: str):
     plt.close()
 
 
-def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=4):
+def plot_reconstructed(model, lib_size, r0=(-4, 4), r1=(-4, 4), n=4):
 
     f, axarr = plt.subplots(n, n, figsize=(8, 8))
     for i, y in enumerate(np.linspace(*r1, n)):
@@ -202,13 +204,12 @@ def plot_reconstructed(model, r0=(-4, 4), r1=(-4, 4), n=4):
             z_ = torch.Tensor([[0] * LATENT_DIM_Z]).to(DEVICE)
 
             # fake log libsize
-            x_hat = model.decoder(
+            x_hat, _ = model.decoder(
                 torch.cat((z, z_), dim=1),
-                torch.log1p(torch.Tensor([1_000]).to(DEVICE)),
+                lib_size,
             )
             x_hat = x_hat.to("cpu").detach().numpy()[0]
             ind = np.arange(x_hat.shape[0])
-            # x_hat = np.exp(x_hat)
 
             axarr[i, j].bar(ind, x_hat, 1, color=CMAP)
             axarr[i, j].set_xticks([])
@@ -223,7 +224,7 @@ LR = 1e-3
 BATCH_SIZE = 128
 LATENT_DIM_S = 2
 LATENT_DIM_Z = 4
-HIDDEN_DIMS = [128, 256, 512]
+HIDDEN_DIMS = [128, 256]
 
 CMAP = np.repeat(
     ["blue", "black", "red", "grey", "green", "pink"],
@@ -254,6 +255,27 @@ def main(args):
 
         X_bg = poisson_resample(rng, X_bg, min_count)
         X_tg = poisson_resample(rng, X_tg, min_count)
+
+    # get empirical mean and variance of log library size
+    bg_sums = np.sum(X_bg, axis=1)
+    tg_sums = np.sum(X_tg, axis=1)
+    log_size = torch.Tensor(
+        [
+            np.mean(
+                np.concatenate(
+                    [
+                        bg_sums,
+                        tg_sums,
+                    ]
+                )
+            )
+        ]
+    ).to(DEVICE)
+
+    # lib_mu, lib_var = (
+    #     torch.Tensor([np.mean(log_size)]),
+    #     torch.Tensor([np.var(log_size)]),
+    # )
 
     X_bg, y_bg = torch.from_numpy(X_bg), torch.from_numpy(y_bg)
     X_tg, y_tg = torch.from_numpy(X_tg), torch.from_numpy(y_tg)
@@ -298,13 +320,16 @@ def main(args):
         z_encoder=qz_encoder,
         decoder=decoder,
         discriminator=discriminator,
+        lib_size=log_size,
     )
     model = model.to(DEVICE)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min")
 
-    loss_fn = losses.CVAELoss(PoissonMultinomial())
+    # loss_fn = losses.CVAELoss(PoissonMultinomial())
+    loss_fn = losses.CVAELoss(losses.NB())
+    # loss_fn = losses.CVAELoss(torch.nn.functional.mse_loss)
 
     print("Start training VAE...")
 
@@ -383,7 +408,6 @@ def main(args):
     s_reps = np.concatenate(s_reps, axis=0)
     z_reps = np.concatenate(z_reps, axis=0)
 
-
     # clf = LogisticRegressionCV(cv=5)
     titles = [
         "Sample embeddings in salient latent space",
@@ -419,7 +443,7 @@ def main(args):
     res_df.to_csv(args.out, index=False)
 
     if args.plot:
-        plot_reconstructed(model, n=4)
+        plot_reconstructed(model, log_size, n=4)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

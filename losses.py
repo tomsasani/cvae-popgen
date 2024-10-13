@@ -1,10 +1,37 @@
+import scvi.distributions
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import scvi
+
 # from https://github.com/suinleelab/MM-cVAE/blob/main/utils.py
 
 DEVICE = torch.device("mps")
+
+
+class NB(nn.Module):
+    def __init__(self):
+        super(NB, self).__init__()
+
+    def forward(
+        self,
+        scaled_rate,
+        dispersion,
+        y_true,
+        reduction: str = "none",
+    ):
+        raw_loss = -scvi.distributions.NegativeBinomial(
+                mu=scaled_rate,
+                theta=dispersion,
+            ).log_prob(y_true)
+
+        if reduction == "sum":
+            return raw_loss.sum()
+        elif reduction == "mean":
+            return raw_loss.mean()
+        elif reduction == "none":
+            return raw_loss
 
 
 class PoissonMultinomial(nn.Module):
@@ -17,16 +44,18 @@ class PoissonMultinomial(nn.Module):
 
     def forward(self, y_pred, y_true, reduction: str = "none"):
 
-        n_kmers = y_pred.shape[1]
-
         # add epsilon to protect against tiny values
         y_true = y_true + self.eps
         y_pred = y_pred + self.eps
 
-        multinomial_term = F.poisson_nll_loss(y_pred, y_true, log_input=False, reduction=reduction)
+        multinomial_term = F.poisson_nll_loss(
+            y_pred,
+            y_true,
+            log_input=False,
+            reduction=reduction,
+        )
 
         loss_raw = multinomial_term
-        
 
         return loss_raw
 
@@ -60,19 +89,19 @@ class VAELoss(nn.Module):
         self.kld_weight = kld_weight
         self.loss_fn = reconstruction_loss_fn
 
-
     def forward(
         self,
         orig: torch.Tensor,
         recon: torch.Tensor,
+        disp: torch.Tensor,
         mu,
         log_var,
     ):
-        # N, C, H, W = orig.shape
 
         # compute per-pixel MSE loss
         recons_loss = self.loss_fn(
             recon,
+            disp,
             orig,
             reduction="none",
         )
@@ -111,9 +140,11 @@ class CVAELoss(nn.Module):
         # inputs have been log1p normalized, so
         # we'll undo that to compare to output counts
         tg_outputs = cvae_dict["tg_out"]
+        tg_dispersion = cvae_dict["tg_disp"]
 
         MSE_tg = self.loss_fn(
             tg_outputs,
+            tg_dispersion,
             tg_inputs,
             reduction="none",
         )
@@ -122,9 +153,11 @@ class CVAELoss(nn.Module):
         MSE_tg = torch.mean(torch.sum(MSE_tg, dim=1), dim=0)
 
         bg_outputs = cvae_dict["bg_out"]
+        bg_dispersion = cvae_dict["bg_disp"]
 
         MSE_bg = self.loss_fn(
             bg_outputs,
+            bg_dispersion,
             bg_inputs,
             reduction="none",
         )
@@ -137,8 +170,8 @@ class CVAELoss(nn.Module):
         tg_z_log_var, tg_z_mu = cvae_dict["tg_z_log_var"], cvae_dict["tg_z_mu"]
         bg_z_log_var, bg_z_mu = cvae_dict["bg_z_log_var"], cvae_dict["bg_z_mu"]
 
-        bg_z, tg_z = cvae_dict["bg_z"], cvae_dict["tg_z"]
-        bg_s = cvae_dict["bg_s"]
+        # bg_z, tg_z = cvae_dict["bg_z"], cvae_dict["tg_z"]
+        # bg_s = cvae_dict["bg_s"]
 
         KLD_z_bg = torch.mean(-0.5 * torch.sum(1 + bg_z_log_var - bg_z_mu.pow(2) - bg_z_log_var.exp(), dim=1), dim=0)
         KLD_z_tg = torch.mean(-0.5 * torch.sum(1 + tg_z_log_var - tg_z_mu.pow(2) - tg_z_log_var.exp(), dim=1), dim=0)
@@ -148,17 +181,11 @@ class CVAELoss(nn.Module):
         # KLD_z_tg = -0.5 * torch.sum(1 + tg_z_log_var - tg_z_mu.pow(2) - tg_z_log_var.exp())
         # KLD_s_tg = -0.5 * torch.sum(1 + tg_s_log_var - tg_s_mu.pow(2) - tg_s_log_var.exp())
 
-        # print (MSE_tg.item(), MSE_bg.item(), KLD_z_bg.item(), KLD_z_tg.item(), KLD_s_tg.item())
-        # print ([el.item() for el in [MSE_bg, MSE_tg, KLD_s_tg, KLD_z_bg, KLD_z_tg]])
         cvae_loss = (MSE_bg + KLD_z_bg) + (MSE_tg + KLD_z_tg + KLD_s_tg)
-        # print (cvae_loss.item())
 
         q_score, q_bar_score = cvae_dict["q_score"], cvae_dict["q_bar_score"]
         discriminator_loss = (-torch.log(q_score) - torch.log(1 - q_bar_score)).mean()
-        # print ([(el.min().item(), el.max().item()) for el in [q_score, q_bar_score]])
 
-        # discriminator_loss = (- torch.log(q_score) - torch.log(1 - q_bar_score)).sum()
-        # print (discriminator_loss.item())
         cvae_loss += discriminator_loss
 
         # gammas = torch.FloatTensor([10 ** x for x in range(-6, 7, 1)])

@@ -83,40 +83,27 @@ class DecoderFC(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        lib_mu: torch.Tensor,
-        lib_var: torch.Tensor,
+        lib_size: torch.Tensor,
     ):
-        # https://academic.oup.com/bioinformatics/article/36/11/3418/5807606?login=false
         decoded = self.fc(x)
         scale = self.fc_out(decoded)
 
         # normalized contribution from each mutation type
         scale = self.softmax(scale)
 
-        # disp = self.dispersion(decoded)
-        # disp = self.softplus(disp)
+        # dispersion parameter for negative binomial
+        disp = self.dispersion(decoded)
+        disp = self.softplus(disp)
 
-        # take a draw from the distribution of total
-        # mutation counts per sample
-        _s = log_normal.LogNormal(lib_mu, lib_var)
-        s = _s.sample().to(DEVICE)
-
-        # _g = gamma.Gamma(disp, scale)
-        # g = _g.sample().to(DEVICE)
-
-        # _p = poisson.Poisson(scale * s)
-        # p = _p.sample()
-        # print (p.shape)
-
-        # p = s * scale
-        # print (scale[0])
-        # return the poisson rate parameter
-        return scale * s
+        # return the poisson rate parameter using
+        # a constant library size, assuming we've normalized
+        # every sample to have the same count of mutations
+        return scale * lib_size, disp
 
 
 class DecoderLinear(nn.Module):
     def __init__(self, *, in_W: int, latent_dim: int, hidden_dims: List[int]):
-        super(DecoderFC, self).__init__()
+        super(DecoderLinear, self).__init__()
 
         bias = False
 
@@ -203,14 +190,13 @@ class VAE(nn.Module):
         self,
         encoder,
         decoder,
-        lib_mu, lib_var,
+        lib_size,
     ) -> None:
         super(VAE, self).__init__()
 
         self.encoder = encoder
         self.decoder = decoder
-        self.lib_mu = lib_mu
-        self.lib_var = lib_var
+        self.lib_size = lib_size
 
     def reparameterize(
         self,
@@ -232,8 +218,8 @@ class VAE(nn.Module):
         """
         mu, log_var = self.encoder(x)
         z = self.reparameterize(mu, log_var)
-        decoded = self.decoder(z, self.lib_mu, self.lib_var)
-        return [decoded, mu, log_var, z]
+        decoded, disp = self.decoder(z, self.lib_size)
+        return [decoded, disp, mu, log_var, z]
 
 
 # contrastive-vae-no-bias
@@ -245,7 +231,7 @@ class CVAE(nn.Module):
         z_encoder,
         decoder,
         discriminator,
-        lib_mu, lib_var,
+        lib_size,
     ):
         super(CVAE, self).__init__()
 
@@ -256,8 +242,7 @@ class CVAE(nn.Module):
         self.decoder = decoder
         # instantitate the disrimintator
         self.discriminator = discriminator
-        self.lib_mu = lib_mu
-        self.lib_var = lib_var
+        self.lib_size = lib_size
 
     def reparameterize(
         self,
@@ -294,24 +279,20 @@ class CVAE(nn.Module):
 
         # decode the target outputs using both the salient and
         # irrelevant features
-
-        tg_outputs = self.decoder(
+        tg_outputs, tg_disp = self.decoder(
             torch.cat([tg_s, tg_z], dim=1),
-            self.lib_mu,
-            self.lib_var,
+            self.lib_size,
         )
         # we decode the background outputs using only the irrelevant
         # features
-        bg_outputs = self.decoder(
+        bg_outputs, bg_disp = self.decoder(
             torch.cat([torch.zeros_like(bg_s), bg_z], dim=1),
-            self.lib_mu,
-            self.lib_var,
+            self.lib_size,
         )
         # we decode the "foreground" using just the salient features
-        fg_outputs = self.decoder(
+        fg_outputs, _ = self.decoder(
             torch.cat([tg_s, torch.zeros_like(tg_z)], dim=1),
-            self.lib_mu,
-            self.lib_var,
+            self.lib_size,
         )
 
         # step 4: (optional) discriminate
@@ -340,6 +321,9 @@ class CVAE(nn.Module):
 
             "q_score": q_score,
             "q_bar_score": q_bar_score,
+
+            "tg_disp": tg_disp,
+            "bg_disp": bg_disp,
         }
 
         return out_dict
